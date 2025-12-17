@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Databases / runtime
+*.db
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Models (DO NOT COMMIT)
+*.gguf
+*.bin
+*.pt
+*.pth
+*.onnx
+*.safetensors

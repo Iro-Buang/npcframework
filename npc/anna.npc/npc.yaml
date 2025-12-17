@@ -1,0 +1,15 @@
+npc_version: "0.1.0"
+id: anna
+display_name: Anna
+
+files:
+  identity: identity.yaml
+  persona: persona.yaml
+  policy: policy.yaml
+  memory: memory.yaml
+  kernel: kernel.yaml
+  actions: actions.yaml
+  tools: tools.yaml
+
+data:
+  db: data/npc.db
