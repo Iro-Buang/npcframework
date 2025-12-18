@@ -5,7 +5,7 @@ from typing import Dict, Any
 
 from NPCLoader import load_npc
 from NPC_DB_Manager import NPCDatabase
-from NPCPrompt_Compiler import compile_messages, CompileOptions, RuntimeInjection, ToolSpec
+from NPCPrompt_Compiler import compile_messages, CompileOptions
 from NPCCommands import handle_command
 from NPC_DB_Episodic_Promoter import EpisodicPromoter
 
@@ -17,7 +17,7 @@ def _debug_print_messages(messages):
     for i, m in enumerate(messages, 1):
         role = m.get("role", "?").upper()
         content = m.get("content", "")
-        print(f"[{i}] {role}\n{content}\n{'-'*60}")
+        print(f"[{i}] {role}\n{content}\n{'-' * 60}")
     print("===== END RAW MESSAGES =====\n")
 
 
@@ -80,10 +80,10 @@ def _sanitize_user_input(text: str, npc_name: str) -> str:
         t = t.split(">", 1)[1].strip()
     return t
 
+
 def run_cli(npc_dir: str, *, history_limit: int = 20) -> None:
     channel = "cli"
     environment_id = "local_cli"  # or "mad_dog", "discord", "web", etc.
-
 
     npc = load_npc(npc_dir)
 
@@ -143,44 +143,13 @@ def run_cli(npc_dir: str, *, history_limit: int = 20) -> None:
         recent = db.get_recent_events(limit=history_limit)
         state = _state_snapshot(db)
 
-        runtime = RuntimeInjection(
-            environment_name="local_cli",
-            environment_facts=[
-                "Conversation is text-only.",
-                "Only the most recent messages are available in the prompt.",
-            ],
-            environment_rules=[
-                "Environment facts must be objective; no emotion or intent.",
-            ],
-            state={
-                "mode": "conversational",
-                "goal": "help the user",
-                "energy": 0.8,
-            },
-            perception_facts=[
-                "User greeted Kevin.",
-            ],
-            # tool promotion example:
-            promote_tools=("search" in user_input.lower()),
-            available_tools=[ToolSpec(
-                name="search",
-                description="Search the web for factual info.",
-                schema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
-                few_shots=[{"input": "Search Bacolod condos",
-                            "output": "/tool_call search {\"query\":\"Bacolod condo price\"}"}],
-            )],
-            additional_policies=[
-                "Do not claim you executed a tool unless the runtime confirms it.",
-            ],
-            identity_role_append="Kevin is currently operating in a local CLI sandbox.",
-        )
         messages = compile_messages(
             identity=npc.identity,
             persona=npc.persona,
             policy=npc.policy,
             recent_events=recent,
-            runtime=runtime,
-            options=CompileOptions(history_limit=20, include_state=True, include_tools=True),
+            state_snapshot=state,
+            options=CompileOptions(history_limit=history_limit, include_state=True),
         )
 
         # DEBUG: inspect exactly what the model will see
@@ -188,7 +157,6 @@ def run_cli(npc_dir: str, *, history_limit: int = 20) -> None:
 
         # Stream response
         print(f"{npc_name}> ", end="", flush=True)
-
 
         chunks = []
         t0 = time.time()
@@ -249,8 +217,8 @@ def run_cli(npc_dir: str, *, history_limit: int = 20) -> None:
         promoter.promote()
 
 
-
 if __name__ == "__main__":
     import sys
+
     npc_dir = sys.argv[1] if len(sys.argv) > 1 else "npc/kevin.npc"
     run_cli(npc_dir, history_limit=20)

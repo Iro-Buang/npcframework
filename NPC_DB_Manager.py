@@ -16,7 +16,6 @@ def _now_ts() -> float:
 
 
 def _now_iso() -> str:
-    # ISO-ish without timezone dependency; good enough for SQLite text sorting
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
 
 
@@ -55,7 +54,9 @@ class NPCDatabase:
     """
     Drop-in replacement:
     - Preserves existing API: init_db, add_event, get_recent_events, set_state, get_state, get_state_many, wipe_events
-    - Implements expanded schema (sessions/events/memories/relations/etc.)
+    - Expanded schema (sessions/events/memories/relations/etc.)
+    - Adds richer event provenance (channel/environment/correlation/parent/status)
+    - Auto-migrates older DBs by adding missing columns/indexes
     - Maintains integer event ids via event_seq for compatibility
     """
 
@@ -100,8 +101,7 @@ class NPCDatabase:
             );
             """)
 
-            # ---- events (new canonical)
-            # event_seq keeps your old "id INTEGER AUTOINCREMENT" vibe
+            # ---- events
             cur.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 event_seq  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,19 +110,38 @@ class NPCDatabase:
                 ts_iso     TEXT NOT NULL,
                 session_id TEXT NOT NULL REFERENCES sessions(session_id),
 
-                actor_type TEXT NOT NULL,   -- user | npc | system | environment | tool
+                channel        TEXT,
+                environment_id TEXT,
+
+                actor_type TEXT NOT NULL,   -- user | assistant | system | environment | tool
                 actor_id   TEXT,
+
                 event_type TEXT NOT NULL,   -- message | tool_call | tool_result | state_change | observation
+                modality   TEXT,            -- text | image | audio | video | structured
+                content_format TEXT,        -- plain | markdown | json | code | html | yaml
+
                 content    TEXT,
                 payload_json TEXT,
+
+                parent_event_id TEXT,       -- causal parent (an event_id)
+                correlation_id  TEXT,       -- trace id across chain
+
+                status     TEXT NOT NULL DEFAULT 'committed', -- received|committed|processed|failed|redacted|superseded
+                processed_at REAL,
+                error_text TEXT,
 
                 importance_hint INTEGER NOT NULL DEFAULT 0,
                 hash TEXT
             );
             """)
 
+            # ---- indexes
             cur.execute("CREATE INDEX IF NOT EXISTS idx_events_session_ts ON events(session_id, ts);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_events_type_ts ON events(event_type, ts);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_events_corr_ts ON events(correlation_id, ts);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_events_parent ON events(parent_event_id);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_events_env_ts ON events(environment_id, ts);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_events_channel_ts ON events(channel, ts);")
 
             # ---- state kv (keep)
             cur.execute("""
@@ -165,7 +184,7 @@ class NPCDatabase:
             cur.execute("""
             CREATE TABLE IF NOT EXISTS memory_sources (
                 memory_id TEXT NOT NULL REFERENCES memories(memory_id) ON DELETE CASCADE,
-                event_id  TEXT NOT NULL, -- references events.event_id logically
+                event_id  TEXT NOT NULL,
                 weight REAL NOT NULL DEFAULT 1.0,
                 PRIMARY KEY (memory_id, event_id)
             );
@@ -233,16 +252,49 @@ class NPCDatabase:
 
             conn.commit()
 
+            # Auto-migrate older DBs (adds missing event columns/indexes safely)
+            self._migrate_events_schema(conn)
+
+    def _migrate_events_schema(self, conn: sqlite3.Connection) -> None:
+        """
+        Adds missing columns/indexes to events table if DB existed before schema expansion.
+        Safe to run repeatedly.
+        """
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(events);")
+        existing = {row["name"] for row in cur.fetchall()}
+
+        def add_col(name: str, ddl_type: str) -> None:
+            if name in existing:
+                return
+            cur.execute(f"ALTER TABLE events ADD COLUMN {name} {ddl_type};")
+
+        # columns that might be missing in older DBs
+        add_col("channel", "TEXT")
+        add_col("environment_id", "TEXT")
+        add_col("modality", "TEXT")
+        add_col("content_format", "TEXT")
+        add_col("parent_event_id", "TEXT")
+        add_col("correlation_id", "TEXT")
+        add_col("status", "TEXT NOT NULL DEFAULT 'committed'")
+        add_col("processed_at", "REAL")
+        add_col("error_text", "TEXT")
+
+        # indexes (idempotent)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_events_session_ts ON events(session_id, ts);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_events_type_ts ON events(event_type, ts);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_events_corr_ts ON events(correlation_id, ts);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_events_parent ON events(parent_event_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_events_env_ts ON events(environment_id, ts);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_events_channel_ts ON events(channel, ts);")
+
+        conn.commit()
+
     # -------------------------
     # Session helpers
     # -------------------------
 
     def _get_or_create_current_session(self, conn: sqlite3.Connection) -> str:
-        """
-        Simple session policy:
-        - If state_kv['current_session_id'] exists and session not ended -> use it
-        - Else create a new session and store it in state_kv
-        """
         cur = conn.cursor()
         cur.execute("SELECT value_json FROM state_kv WHERE key = ?", ("current_session_id",))
         row = cur.fetchone()
@@ -258,14 +310,12 @@ class NPCDatabase:
                 if srow and (srow["ended_at"] is None):
                     return sid
 
-        # create session
         session_id = f"sess_{_uuid()}"
         cur.execute(
             """INSERT INTO sessions (session_id, started_at, channel, environment_id, meta_json)
                VALUES (?, ?, ?, ?, ?)""",
             (session_id, _now_iso(), self.default_channel, self.default_environment_id, "{}"),
         )
-        # store in state
         cur.execute("""
             INSERT INTO state_kv (key, value_json, updated_at)
             VALUES (?, ?, ?)
@@ -275,7 +325,6 @@ class NPCDatabase:
         return session_id
 
     def end_session(self) -> None:
-        """Optional: explicitly end the current session."""
         with self.connect() as conn:
             cur = conn.cursor()
             cur.execute("SELECT value_json FROM state_kv WHERE key = ?", ("current_session_id",))
@@ -299,67 +348,131 @@ class NPCDatabase:
         """
         Drop-in behavior:
         - role: "user" | "assistant" | "system" (original)
-        - Stores to new canonical events table
-        - Returns integer event_seq as "id" for compatibility
+        - Stores to canonical events table
+        - Returns integer event_seq for compatibility
+
+        New support:
+        - channel/environment_id
+        - parent_event_id / correlation_id
+        - status/processed_at/error_text
+        - modality/content_format
         """
         if meta is None:
             meta = {}
+
         ts = _now_ts()
         ts_iso = _now_iso()
 
-        # Map old roles to new actor_type
-        actor_type = role
+        # normalize actor_type to your DB language
         if role == "npc":
             actor_type = "assistant"
-        elif role == "user":
-            actor_type = "user"
-        elif role == "system":
-            actor_type = "system"
+        elif role in ("assistant", "user", "system"):
+            actor_type = role
         else:
             actor_type = "unknown"
 
-        # Basic event type inference; override via meta if you want
-        event_type = str(meta.get("event_type") or "message")
+        payload = dict(meta)
+        payload.setdefault("role", role)  # keep compatibility
+
+        # core fields
+        event_type = str(payload.get("event_type") or "message")
+        channel = str(payload.get("channel") or self.default_channel or "cli")
+        environment_id = payload.get("environment_id", self.default_environment_id)
+        environment_id = str(environment_id) if environment_id is not None else None
+
+        modality = payload.get("modality")
+        modality = str(modality) if modality is not None else ("text" if event_type == "message" else None)
+
+        content_format = payload.get("content_format")
+        content_format = str(content_format) if content_format is not None else "plain"
+
+        parent_event_id = payload.get("parent_event_id")
+        parent_event_id = str(parent_event_id) if parent_event_id else None
+
+        # ---- correlation policy (simple + useful)
+        corr = payload.get("correlation_id")
+        corr = str(corr) if corr else None
+
+        status = str(payload.get("status") or "committed")
+        processed_at = payload.get("processed_at")
+        try:
+            processed_at = float(processed_at) if processed_at is not None else None
+        except Exception:
+            processed_at = None
+
+        error_text = payload.get("error_text")
+        error_text = str(error_text) if error_text else None
 
         with self.connect() as conn:
             session_id = self._get_or_create_current_session(conn)
             cur = conn.cursor()
 
+            # load existing current correlation id if any
+            cur.execute("SELECT value_json FROM state_kv WHERE key = ?", ("current_correlation_id",))
+            row = cur.fetchone()
+            current_corr = None
+            if row:
+                try:
+                    current_corr = json.loads(row["value_json"])
+                except Exception:
+                    current_corr = None
+            if not isinstance(current_corr, str):
+                current_corr = None
+
+            # choose correlation id
+            if corr:
+                correlation_id = corr
+            else:
+                if actor_type == "user":
+                    correlation_id = f"corr_{_uuid()}"
+                    # set it as current for the rest of the turn
+                    cur.execute("""
+                        INSERT INTO state_kv (key, value_json, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at
+                    """, ("current_correlation_id", _json_dumps(correlation_id), _now_ts()))
+                else:
+                    correlation_id = current_corr
+
             event_id = f"evt_{_uuid()}"
-            payload = dict(meta)
-            # preserve compatibility metadata
-            payload.setdefault("role", role)
+
+            # actor_id policy
+            actor_id = payload.get("actor_id")
+            if actor_id is None and actor_type == "assistant":
+                actor_id = self.npc_id
+            actor_id = str(actor_id) if actor_id is not None else None
+
             payload_json = _json_dumps(payload)
 
             cur.execute(
                 """INSERT INTO events
-                   (event_id, ts, ts_iso, session_id, actor_type, actor_id, event_type, content, payload_json, importance_hint, hash)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (event_id, ts, ts_iso, session_id,
+                    channel, environment_id,
+                    actor_type, actor_id,
+                    event_type, modality, content_format,
+                    content, payload_json,
+                    parent_event_id, correlation_id,
+                    status, processed_at, error_text,
+                    importance_hint, hash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    event_id,
-                    ts,
-                    ts_iso,
-                    session_id,
-                    actor_type,
-                    payload.get("actor_id") or (self.npc_id if actor_type == "npc" else None),
-                    event_type,
-                    content,
-                    payload_json,
+                    event_id, ts, ts_iso, session_id,
+                    channel, environment_id,
+                    actor_type, actor_id,
+                    event_type, modality, content_format,
+                    content, payload_json,
+                    parent_event_id, correlation_id,
+                    status, processed_at, error_text,
                     int(payload.get("importance_hint", 0) or 0),
                     payload.get("hash"),
                 ),
             )
             conn.commit()
-            return int(cur.lastrowid)  # event_seq
+            return int(cur.lastrowid)
 
     def get_recent_events(self, limit: int = 20) -> List[Event]:
-        """
-        Drop-in behavior:
-        - returns List[Event] in chronological order
-        """
         with self.connect() as conn:
             cur = conn.cursor()
-            # Most recent across ALL sessions; matches old behavior
             cur.execute(
                 """SELECT event_seq, ts, actor_type, content, payload_json
                    FROM events
@@ -372,10 +485,9 @@ class NPCDatabase:
         events: List[Event] = []
         for r in reversed(rows):
             payload = _json_loads(r["payload_json"])
-            # Map back to old 'role'
+
             role = payload.get("role")
             if not role:
-                # reverse-map actor_type
                 at = str(r["actor_type"])
                 role = "assistant" if at == "npc" else at
 
@@ -391,16 +503,12 @@ class NPCDatabase:
         return events
 
     def wipe_events(self) -> None:
-        """
-        Drop-in behavior:
-        - Clears event history
-        - Leaves derived tables intact (your choice)
-        """
         with self.connect() as conn:
             cur = conn.cursor()
             cur.execute("DELETE FROM events;")
-            # Optional: also clear sessions that are now empty
             cur.execute("DELETE FROM sessions;")
+            # also clear correlation/session pointers so you don’t reference ghosts
+            cur.execute("DELETE FROM state_kv WHERE key IN ('current_session_id','current_correlation_id');")
             conn.commit()
 
     # -------------------------
@@ -410,7 +518,6 @@ class NPCDatabase:
     def set_state(self, key: str, value: Any) -> None:
         ts = _now_ts()
         value_json = _json_dumps(value)
-
         with self.connect() as conn:
             cur = conn.cursor()
             cur.execute("""
@@ -427,7 +534,6 @@ class NPCDatabase:
             cur = conn.cursor()
             cur.execute("SELECT value_json FROM state_kv WHERE key = ?", (key,))
             row = cur.fetchone()
-
         if not row:
             return default
         try:
@@ -439,7 +545,7 @@ class NPCDatabase:
         return {k: self.get_state(k) for k in keys}
 
     # -------------------------
-    # New capabilities (optional but you’ll want them)
+    # New capabilities
     # -------------------------
 
     def create_memory(
@@ -455,9 +561,6 @@ class NPCDatabase:
         pinned: bool = False,
         source_event_seqs: Optional[List[int]] = None,
     ) -> str:
-        """
-        Create a derived memory item and optionally attach provenance from event_seq list.
-        """
         memory_id = f"mem_{_uuid()}"
         created_at = _now_iso()
         data_json = _json_dumps(data or {})
@@ -478,7 +581,6 @@ class NPCDatabase:
             )
 
             if source_event_seqs:
-                # translate event_seq -> event_id for stable linking
                 q_marks = ",".join(["?"] * len(source_event_seqs))
                 cur.execute(
                     f"SELECT event_id FROM events WHERE event_seq IN ({q_marks})",

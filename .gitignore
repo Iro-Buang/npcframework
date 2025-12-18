@@ -25,3 +25,12 @@ Thumbs.db
 *.pth
 *.onnx
 *.safetensors
+
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# PyCharm
+.idea/

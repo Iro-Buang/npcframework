@@ -59,6 +59,6 @@ def run_cli(npc_dir: str, *, history_limit: int = 20) -> None:
         reply = engine.chat(messages)
 
         # 6) log assistant
-        db.add_event("assistant", reply)
+        db.add_event("npc", reply)
 
         print(f"Kevin> {reply}\n")
