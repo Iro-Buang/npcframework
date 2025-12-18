@@ -76,3 +76,14 @@ Memory
 Decision and Action Instructions
 	- "Given all of the above details and last user input, decide whether to reply conversationally or call a tool. If a tool call is needed, start reply by /tool call and adhere to the tool use instructions. Otherwise, reply as you would. Do not narrate nor justify, only act."
 	- Runtime must contain capture logic and loop for this section.
+	- "Given all of the above details and the last user input, decide whether to reply conversationally or call a tool.
+
+If a tool call is needed:
+- Start the reply with /tool_call
+- Follow the tool use instructions exactly.
+
+If no tool call is needed:
+- Reply conversationally in character.
+
+Do not narrate, explain, or justify your decision.
+Only act."

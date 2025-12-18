@@ -1,0 +1,268 @@
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Callable
+
+from core.NPC_Loader import load_npc
+from core.NPC_DB_Manager import NPCDatabase
+from core.Runtime_Prompt_Compiler import compile_messages, CompileOptions, RuntimeInjection, ToolSpec
+from core.Runtime_Commands import handle_command
+from core.NPC_DB_Episodic_Promoter import EpisodicPromoter
+
+from inference.llamacpp import LlamaCppEngine, LlamaCppConfig
+
+
+# =============================================================================
+# CONFIG
+# =============================================================================
+
+@dataclass
+class RuntimeConfig:
+    channel: str = "cli"
+    environment_id: str = "local_cli"
+    environment_name: str = "local_cli"
+
+    default_history_limit: int = 20
+    compile_history_limit: int = 20
+    include_state_in_prompt: bool = True
+    include_tools_in_prompt: bool = True
+
+    debug_print_messages: bool = True
+    debug_assert_messages_valid: bool = True
+
+    model_path: str = "inference/models/Meta-Llama-3-8B-Instruct.Q4_K_M.gguf"
+    model_n_ctx: int = 8192
+    model_max_tokens: int = 256
+    model_temperature: float = 0.7
+    model_top_p: float = 0.9
+    model_n_gpu_layers: int = 0
+
+    default_state_mode: str = "idle"
+    default_state_mood: str = "neutral"
+    default_state_energy: float = 0.8
+
+    runtime_goal: str = "help the user"
+    runtime_mode: str = "conversational"
+    runtime_perception_facts: List[str] = field(default_factory=list)
+    runtime_env_facts: List[str] = field(default_factory=list)
+    runtime_env_rules: List[str] = field(default_factory=list)
+    runtime_additional_policies: List[str] = field(default_factory=list)
+    identity_role_append: str = ""
+
+    tool_promote_keywords: tuple[str, ...] = ()
+    tool_builder: Optional[Callable[[], List[ToolSpec]]] = None
+
+
+# =============================================================================
+# REQUEST / RESULT
+# =============================================================================
+
+StreamCallback = Callable[[str], None]
+
+@dataclass
+class TurnRequest:
+    npc_dir: str
+    user_input: str
+
+    stream_callback: Optional[StreamCallback] = None
+
+    channel: Optional[str] = None
+    environment_id: Optional[str] = None
+    environment_name: Optional[str] = None
+
+    perception_facts: Optional[List[str]] = None
+    env_facts: Optional[List[str]] = None
+    env_rules: Optional[List[str]] = None
+    additional_policies: Optional[List[str]] = None
+    identity_role_append: Optional[str] = None
+
+    external_state: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class TurnResult:
+    npc_name: str
+
+    handled_by_system1: bool
+    system1_response: Optional[str]
+    should_exit: bool
+
+    assistant_reply: Optional[str]
+    wrote_user_event: bool
+    wrote_assistant_event: bool
+
+    compiled_messages: Optional[List[Dict[str, str]]] = None
+    error: Optional[str] = None
+
+
+# =============================================================================
+# HELPERS
+# =============================================================================
+
+def _assert_messages_valid(messages: Any) -> None:
+    if not isinstance(messages, list):
+        raise TypeError("messages must be a list")
+    for m in messages:
+        if not isinstance(m, dict) or "role" not in m or "content" not in m:
+            raise ValueError("invalid message shape")
+
+
+def _ensure_default_state(db: NPCDatabase, cfg: RuntimeConfig) -> None:
+    for k, v in {
+        "mode": cfg.default_state_mode,
+        "mood": cfg.default_state_mood,
+        "energy": cfg.default_state_energy,
+    }.items():
+        if db.get_state(k) is None:
+            db.set_state(k, v)
+
+
+def _state_snapshot(db: NPCDatabase, cfg: RuntimeConfig) -> Dict[str, Any]:
+    return {
+        "mode": db.get_state("mode", cfg.default_state_mode),
+        "mood": db.get_state("mood", cfg.default_state_mood),
+        "energy": db.get_state("energy", cfg.default_state_energy),
+    }
+
+
+def _build_runtime_injection(user_input: str, state: Dict[str, Any], cfg: RuntimeConfig, req: TurnRequest):
+    runtime_state = {
+        "mode": cfg.runtime_mode,
+        "goal": cfg.runtime_goal,
+        "energy": state.get("energy"),
+    }
+    if req.external_state:
+        runtime_state.update(req.external_state)
+
+    return RuntimeInjection(
+        environment_name=req.environment_name or cfg.environment_name,
+        environment_facts=req.env_facts or cfg.runtime_env_facts,
+        environment_rules=req.env_rules or cfg.runtime_env_rules,
+        state=runtime_state,
+        perception_facts=req.perception_facts or cfg.runtime_perception_facts,
+        promote_tools=False,
+        available_tools=cfg.tool_builder() if cfg.tool_builder else [],
+        additional_policies=req.additional_policies or cfg.runtime_additional_policies,
+        identity_role_append=req.identity_role_append or cfg.identity_role_append,
+    )
+
+
+# =============================================================================
+# ENGINE
+# =============================================================================
+
+def build_engine(cfg: RuntimeConfig) -> LlamaCppEngine:
+    return LlamaCppEngine(
+        LlamaCppConfig(
+            model_path=cfg.model_path,
+            n_ctx=cfg.model_n_ctx,
+            max_tokens=cfg.model_max_tokens,
+            temperature=cfg.model_temperature,
+            top_p=cfg.model_top_p,
+            n_gpu_layers=cfg.model_n_gpu_layers,
+        )
+    )
+
+
+# =============================================================================
+# CORE TURN RUNNER
+# =============================================================================
+
+def run_turn(*, req: TurnRequest, cfg: RuntimeConfig, engine: Any, npc=None, db=None) -> TurnResult:
+    try:
+        npc = npc or load_npc(req.npc_dir)
+        npc_name = npc.manifest.get("display_name") or "NPC"
+
+        db = db or NPCDatabase(npc.paths.db)
+        db.init_db()
+        _ensure_default_state(db, cfg)
+
+        user_input = req.user_input.strip()
+        if not user_input:
+            return TurnResult(npc_name, True, None, False, None, False, False)
+
+        cmd = handle_command(user_input, npc=npc, npc_db=db)
+        if cmd.handled:
+            return TurnResult(npc_name, True, cmd.response, cmd.should_exit, None, False, False)
+
+        db.add_event("user", user_input, meta={"channel": cfg.channel})
+
+        recent = db.get_recent_events(cfg.default_history_limit)
+        state = _state_snapshot(db, cfg)
+        runtime = _build_runtime_injection(user_input, state, cfg, req)
+
+        messages = compile_messages(
+            identity=npc.identity,
+            persona=npc.persona,
+            policy=npc.policy,
+            recent_events=recent,
+            runtime=runtime,
+            options=CompileOptions(cfg.compile_history_limit, cfg.include_state_in_prompt, cfg.include_tools_in_prompt),
+        )
+
+        if cfg.debug_assert_messages_valid:
+            _assert_messages_valid(messages)
+
+        chunks: List[str] = []
+
+        if req.stream_callback:
+            for token in engine.chat_stream(messages):
+                chunks.append(token)
+                req.stream_callback(token)
+        else:
+            for token in engine.chat_stream(messages):
+                chunks.append(token)
+
+        reply = "".join(chunks).strip() or "No Output"
+
+        db.add_event("assistant", reply, meta={"channel": cfg.channel})
+        EpisodicPromoter(db).promote()
+
+        return TurnResult(npc_name, False, None, False, reply, True, True)
+
+    except Exception as e:
+        return TurnResult("NPC", False, None, False, None, False, False, error=str(e))
+
+
+# =============================================================================
+# CLI
+# =============================================================================
+
+def run_cli(npc_dir: str):
+    cfg = RuntimeConfig()
+    engine = build_engine(cfg)
+    npc = load_npc(npc_dir)
+    db = NPCDatabase(npc.paths.db)
+    db.init_db()
+
+    npc_name = npc.manifest.get("display_name") or "NPC"
+    print(f"{npc_name} online.\n")
+
+    while True:
+        raw = input("You> ").strip()
+        if not raw:
+            continue
+
+        print(f"{npc_name}> ", end="", flush=True)
+
+        res = run_turn(
+            req=TurnRequest(
+                npc_dir=npc_dir,
+                user_input=raw,
+                stream_callback=lambda t: print(t, end="", flush=True),
+            ),
+            cfg=cfg,
+            engine=engine,
+            npc=npc,
+            db=db,
+        )
+
+        print("\n")
+        if res.should_exit:
+            break
+
+
+if __name__ == "__main__":
+    import sys
+    run_cli(sys.argv[1] if len(sys.argv) > 1 else "npc/kevin.npc")

@@ -1,0 +1,84 @@
+Micro Big Brother: NPC Edition
+NPCFramework Demo Game Simulator
+Multi-Agent Orchestration in a Shared Environment Using a Single Runtime and WorldSpace
+
+
+Description
+	- Micro Big Brother NPC Edition game is a test of NPCFramework's runtime capabilities as well as a proof of concept and demonstration of NPCs in social experiments and task-based execution achieved using NPCFramework's philosophy.
+
+
+Scenario:
+	- Kevin and Anna are unique NPC's living in a house. The house has 5 rooms: Kevin's room; Anna's room; Dining Room; Kitchen; Living Room. Going from any room requires passing through the living room first (e.g. Kevin's room -> Living Room -> Any other room).
+
+
+The Game:
+
+	- Kevin is assigned a secret set of tasks of which he needs to be achieve before Anna can guess them all. These tasks are:
+		- Make Anna cook bacon
+		- Go inside Anna's room by asking her to unlock it first.
+		- Convince Anna to go to Kevin's room.
+
+	- Anna on the other hand knows Kevin have three tasks assigned to him, but is not actually aware of which tasks they are. Anna have 3 guesses initially. Anna can use a variety of strategies dictated by the model to guess including asking probing questions, talking, or doing tasks, which by doing so gives her an additional guess.
+
+	- Kevin must never let Anna know what his tasks are unless Anna declares a guess. Kevin can use a variety of strategies the model deems fit, either by asking Anna to do other tasks that is not the target tasks, or tricking Anna into using a guess.
+
+	- The game system will validate the guess and tell them if Anna got it right
+
+
+The Rules:
+	- Kevin starts his position in the living room, and Anna starts in the kitchen.
+	- There will be 25 turns in this game and both NPCs must be able to do their tasks within the turn limit.
+	- Kevin or Anna can only see who's in the room and not where each other currently is.
+	- Kevin can request Anna to perform any of the listed tasks.
+	- Anna can refuse requests up to 6 times.
+	- Kevin can request Anna to do tasks up to 9 times
+	- If Kevin and Anna are in the same room a turn, they can request to talk to each other.
+	- If both parties agree to talk, they will enter a "Talking session".
+		- During Talking session phase, both NPC can only have 3 exchanges before the session ends.
+		- During the talking session, either one of the NPC's can actively choose to end the conversation or proceed.
+		- After the third exchange, talking session ends, and they can decide to request again another "Talking Session" to each other or move somewhere else in the house or perform a task.
+	- If Anna performs a tasks on her own, it still counts.
+	- The win condition for either agent are:
+		- All 3 tasks on Kevin's checklist are completed.
+		- Anna correctly guesses what those 3 tasks are.
+	- Its they both reach turn 25 without a winner, winner is decided by whether Anna guessed more items on Kevin's checklist or if the tasks crossed out on Kevin's checklist are more than Anna's correct guesses.
+
+	- Every turn, each NPC have the following choices they can do:
+
+		- Anna's choices (represented as tool calls):
+			- clean_living_room()
+				- Only callable once. Only available when current NPC is in the living room
+			- wash_dishes()
+				- Only callable once. Only available when current NPC is in the kitchen		
+			- cook(either egg, bacon, or hotdog)
+				- only choose one per turn. each choice can only be called once
+				- only available when the NPC is in the kitchen
+			- move_to(living_room, dining_room, kitchen, anna_room, kevin_room, dining_room)
+				- Note: If they are in any other room other than living room, they can only move to the living room.
+				- Note: Neither Kevin nor Anna can enter a locked room, Anna must unlock it first.
+			- unlock_room()
+				- Anna can only perform this function in the living room.
+			- talk()
+				- Option is only available if the other NPC is in the same room.
+			- reject_talk_request() or accept_talk_request()
+				- Only available when the other NPC requests to talk on the same turn
+			- guess(task_name())
+				- Every guess Anna makes deducts her available guesses. But every task performed, grant adds one more guess.
+			- skip():
+				- Skips a turn
+			- accept/reject_task()
+				- Anna can only accept or reject requested tasks by Kevin. If Anna accepts she is moves to the relevant room and bypasses the living room constraint.
+				- Each rejection costs Anna 1 reject
+
+		- Kevin's choices (represented as tool calls):
+			- move_to(living_room, dining_room, kitchen, anna_room, kevin_room, dining_room)
+			- talk()
+				- reject_talk_request() or accept_talk_request()
+				- Only available when the other NPC requests to talk. 
+			- skip()
+				- Skips a turn
+			- request_anna(cook(egg/bacon/hotdog), clean_living_room(), move_to(room_name), etc.)
+				- Each use reduces Kevin's request count by 1 from 9
+				- Kevin can request the same thing multiple times unless Anna has already done it and its eliminated from the choices.
+
+			- Note: Peak Kevin. Only talks, moves, or skips a turn, or boss Anna around

@@ -1,0 +1,89 @@
+Prompt Compilation Breakdown
+
+System Instructions
+	- This Describes the Core Instructions of NPCFramework
+	- System RUles, Safety Guardrails, etc.
+	- Non-appendable
+
+Environmental Instructions
+	- This describes the current environment the NPC is inhabiting
+	- Describes the environment around irrespective of perspective
+	- Describes the environment rules
+	- Runtime/Application can store/forward additional descriptors and data via function call
+	- Promotion of context to prompt may also depend on context gathered by perspective and NPC state (Advanced Implementation and requires runtime access to information on the application layer via queries, FTS, or embeddings)
+	- Environmental Instructions must never encode intent, emotion, or subjective interpretation, only constraints and environmental facts
+
+Tool Use Instructions
+	- Only gets promoted in when there are possible tool calls that are promoted through captured input context (e.g. through captured keywords like "remember", "search" "mathematical symbols", presence of numbers.)
+	- Requires tool registry which houses the functions, descriptions, and function call schema.
+	- Describes the implementation and proper tool call syntax and uses "few shot" prompting format.
+	- Promotion is based on top k relevance on captured user context
+	- Only gets promoted in the prompt when available tools > 0
+
+Identity Instructions
+	- Based on compiled identity file on the npc file
+	- Explicit, but additional role can be appended based on application/environment/world (e.g. Kevin the NPC living as a Minecraft villager)
+	- Advanced Implementation: Identity shift, appended, or decay over time based on experienced events which transform into beliefs, ideas, or values (not now Kevin until v2 be static 2D NPC and that's fine).
+
+
+Persona Instructions
+	- Explicitly stated, initially based on gathered .npc file
+	- Desribes style, tone, verbose, speech rules, etc.
+	- Additional data can be appended but not recommended from application/environment layer (e.g. not now).
+
+Policies
+	- Explicitly stated based on npc files
+	- Sets Hard Boundaries of what an NPC can say, act, or do
+	- Additional Policies can be appended from the application/environment layer.
+	- In case of conflict, Policies override will always Persona, Identity, State, Memory, and User Input.
+
+State
+	- Explicitly stated based from the application/environment layer.
+	- Only gets promoted in the prompt when state is present (no neutral default values).
+	- Describes what is happening to the NPC on the application/environment layer
+	- Describes the target goal/ideal state in the current context
+	- Recommended when passing through a model to be in a descriptive with context (e.g. Kevin's HP: 40, ideal: 100)
+
+Perception
+	- Explicitly stated
+	- Describes what the NPC "Perceives" (who is around, what is happening, what things are present, etc.)
+	- Must require continuous updates with every prompt, aiming to achieve as "real-time" perception as possible.
+	- Recommended to be as descriptive yet concise as possible.
+	- Recommended to have a supporting algorithm from the application/environment layer that streams perception.
+	- Recommended to only include objective facts, without intent or speculation unless explicitly stated/observed.
+	- Advanced implementation contains perception decay and relevance filtering 
+
+Memory
+	- Contains 3 Layers
+	- Recalled Contexts
+		- Explicitly Stated
+		- Entries are entirely promotion-based via captured user input
+		- Simple Promotion Rule: if user input + working session memory contains a subject/noun/entity that is no longer included in the working/session memory, promote to recalled memory capped by top k on relevance.
+		- Advanced Implementation: Summarized Recollection from episodic memory and only summaries get promoted
+
+	- Semantic Memory
+		- Current NPCFramework does not yet support this implementation natively.
+		- Promotion is done on the application/environment layer via context injection and should be based on last k context from user input.
+		- Contains facts, opinions, observations, beliefs, additional world knowledge
+		- If no semantic memory is injected, this will not be present.
+
+	- Working Memory
+		- Explicitly Stated
+		- Explicit Recall of the entire session or the latest n memory from events, whichever is lower
+		- Advanced Implementation may also include current conversation summary (require a model call, do it later.)
+
+
+Decision and Action Instructions
+	- "Given all of the above details and last user input, decide whether to reply conversationally or call a tool. If a tool call is needed, start reply by /tool call and adhere to the tool use instructions. Otherwise, reply as you would. Do not narrate nor justify, only act."
+	- Runtime must contain capture logic and loop for this section.
+	- "Given all of the above details and the last user input, decide whether to reply conversationally or call a tool.
+
+If a tool call is needed:
+- Start the reply with /tool_call
+- Follow the tool use instructions exactly.
+
+If no tool call is needed:
+- Reply conversationally in character.
+
+Do not narrate, explain, or justify your decision.
+Only act."
