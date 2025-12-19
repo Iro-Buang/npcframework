@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "npcframework"
+version = "0.1.0"
+description = "Deterministic-first, entity-centric NPC agent framework (LLM optional)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Iro Buang" }]
+
+dependencies = [
+  "pyyaml>=6.0",
+]
+
+[project.scripts]
+npcframework = "npcframework.cli:main"
+
+[tool.setuptools]
+packages = ["npcframework", "npcframework.core", "npcframework.inference"]
+
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

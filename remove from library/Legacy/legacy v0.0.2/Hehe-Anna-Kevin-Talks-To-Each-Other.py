@@ -6,9 +6,9 @@ import random
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional
 
-from npcframework.core.NPC_Loader import load_npc
-from npcframework.core.NPC_DB_Manager import NPCDatabase
-from npcframework.core.Runtime_Prompt_Compiler import compile_messages, CompileOptions
+from NPCLoader import load_npc
+from NPC_DB_Manager import NPCDatabase
+from NPCPrompt_Compiler import compile_messages, CompileOptions
 from npcframework.inference.llamacpp import LlamaCppEngine, LlamaCppConfig
 
 

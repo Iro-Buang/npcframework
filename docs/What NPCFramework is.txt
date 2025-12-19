@@ -1,0 +1,39 @@
+
+NPCFramework is NOT:
+
+a simulator
+
+a world engine
+
+a scheduler
+
+a router
+
+a tool safety system
+
+a prompt zoo
+
+an agent manager
+
+a LangChain replacement
+
+
+
+NPCFramework is a deterministic entity runtime.
+It does not own the world. It does not own trust. It does not own policy beyond the NPC.
+
+NPCFramework will execute any tool it is given.
+NPCFramework does not validate tool safety or correctness.
+Tool trust belongs to the caller.
+
+And reflect it in code:
+
+available_tools and tool_handlers are per-turn
+
+no global tool registry
+
+no default tools
+
+empty list = no tools
+
+If an app hands a nuke to the NPC, the framework pulls the trigger and logs it. Period.

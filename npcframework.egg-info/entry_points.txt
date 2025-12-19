@@ -1,0 +1,2 @@
+[console_scripts]
+npcframework = npcframework.cli:main
