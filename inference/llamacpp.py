@@ -88,7 +88,22 @@ class LlamaCppEngine:
 
     def _stop_tokens(self) -> List[str]:
         # Default stop tokens if none provided
-        return self.cfg.stop or ["[USER]", "<<SYS>>", "<</SYS>>", "[ASSISTANT]"]
+        base = self.cfg.stop or ["[USER]", "<<SYS>>", "<</SYS>>", "[ASSISTANT]"]
+
+        # Extra guard rails for common delimiter garbage some models emit
+        extra = [
+            "<<END>>",
+            "<<USER>>",
+            "<<ASSISTANT>>",
+            "==============================",
+        ]
+
+        # de-dup while preserving order
+        out: List[str] = []
+        for t in list(base) + extra:
+            if t and t not in out:
+                out.append(t)
+        return out
 
     def chat_stream(self, messages: List[Message]) -> Iterable[str]:
         prompt = messages_to_prompt(messages)

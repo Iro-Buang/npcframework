@@ -7,7 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "core"))
 
-from core.Runtime_Inference_LlamaCPP import run_turn, RuntimeConfig, TurnRequest, build_engine
+from core.Runtime_Inference_LlamaCPP import run_turn, RuntimeConfig, TurnRequest, build_engine, run_cli
+
+
 # If you want CLI too:
 # from Runtime_Inference_LlamaCPP import run_cli
 
@@ -72,7 +74,11 @@ def main_stream():
     # print(f"{result.npc_name}> {result.assistant_reply}")
 
 
+def main_main():
+    run_cli("npc/kevin.npc")
+
 if __name__ == "__main__":
     # pick one:
     # main_dump()
-    main_stream()
+    # main_stream()
+    main_main()

@@ -216,6 +216,7 @@ def build_tool_instructions(inj: RuntimeInjection) -> str:
         "To call a tool:",
         f"- Start your response with: {TOOL_CALL_FORMAT}",
         "- Use valid JSON only.",
+        "Tool arguments must be taken exactly from the user’s request. Do not transform, estimate, or substitute numbers.",
         "- Do not include commentary before or after the tool call.",
         "",
         "Available Tools:",

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Callable
 
@@ -9,8 +8,11 @@ from core.NPC_DB_Manager import NPCDatabase
 from core.Runtime_Prompt_Compiler import compile_messages, CompileOptions, RuntimeInjection, ToolSpec
 from core.Runtime_Commands import handle_command
 from core.NPC_DB_Episodic_Promoter import EpisodicPromoter
+from core.Runtime_Orchestrator import run_with_tools, ToolRuntime
 
 from inference.llamacpp import LlamaCppEngine, LlamaCppConfig
+from pathlib import Path
+
 
 
 # =============================================================================
@@ -50,8 +52,10 @@ class RuntimeConfig:
     runtime_additional_policies: List[str] = field(default_factory=list)
     identity_role_append: str = ""
 
+    # Tooling
     tool_promote_keywords: tuple[str, ...] = ()
     tool_builder: Optional[Callable[[], List[ToolSpec]]] = None
+    tool_executor_builder: Optional[Callable[[], Dict[str, Callable[[Dict[str, Any]], Any]]]] = None
 
 
 # =============================================================================
@@ -126,7 +130,18 @@ def _state_snapshot(db: NPCDatabase, cfg: RuntimeConfig) -> Dict[str, Any]:
     }
 
 
-def _build_runtime_injection(user_input: str, state: Dict[str, Any], cfg: RuntimeConfig, req: TurnRequest):
+def _should_promote_tools(user_input: str, cfg: RuntimeConfig) -> bool:
+    """
+    v0 heuristic: promote tools if any keyword appears in user input.
+    If no keywords configured, tools never promote (safe default).
+    """
+    if not cfg.tool_promote_keywords:
+        return False
+    text = (user_input or "").lower()
+    return any(k.lower() in text for k in cfg.tool_promote_keywords)
+
+
+def _build_runtime_injection(user_input: str, state: Dict[str, Any], cfg: RuntimeConfig, req: TurnRequest) -> RuntimeInjection:
     runtime_state = {
         "mode": cfg.runtime_mode,
         "goal": cfg.runtime_goal,
@@ -135,14 +150,16 @@ def _build_runtime_injection(user_input: str, state: Dict[str, Any], cfg: Runtim
     if req.external_state:
         runtime_state.update(req.external_state)
 
+    promote = _should_promote_tools(user_input, cfg)
+
     return RuntimeInjection(
         environment_name=req.environment_name or cfg.environment_name,
         environment_facts=req.env_facts or cfg.runtime_env_facts,
         environment_rules=req.env_rules or cfg.runtime_env_rules,
         state=runtime_state,
         perception_facts=req.perception_facts or cfg.runtime_perception_facts,
-        promote_tools=False,
-        available_tools=cfg.tool_builder() if cfg.tool_builder else [],
+        promote_tools=promote,
+        available_tools=(cfg.tool_builder() if (cfg.tool_builder and promote) else []),
         additional_policies=req.additional_policies or cfg.runtime_additional_policies,
         identity_role_append=req.identity_role_append or cfg.identity_role_append,
     )
@@ -152,10 +169,35 @@ def _build_runtime_injection(user_input: str, state: Dict[str, Any], cfg: Runtim
 # ENGINE
 # =============================================================================
 
+from pathlib import Path
+
+def _resolve_path(p: str) -> str:
+    """
+    Resolves paths robustly:
+    - If absolute, keep it.
+    - If relative, resolve relative to project root (parent of /core).
+    """
+    path = Path(p)
+
+    if path.is_absolute():
+        return str(path)
+
+    # project root = .../NPCFramework (parent of /core)
+    project_root = Path(__file__).resolve().parents[1]
+    candidate = (project_root / path).resolve()
+
+    return str(candidate)
+
+
 def build_engine(cfg: RuntimeConfig) -> LlamaCppEngine:
+    model_path = _resolve_path(cfg.model_path)
+
+    if not Path(model_path).exists():
+        raise ValueError(f"Model path does not exist: {model_path}")
+
     return LlamaCppEngine(
         LlamaCppConfig(
-            model_path=cfg.model_path,
+            model_path=model_path,
             n_ctx=cfg.model_n_ctx,
             max_tokens=cfg.model_max_tokens,
             temperature=cfg.model_temperature,
@@ -163,6 +205,20 @@ def build_engine(cfg: RuntimeConfig) -> LlamaCppEngine:
             n_gpu_layers=cfg.model_n_gpu_layers,
         )
     )
+
+
+
+def warm_engine(engine: Any) -> None:
+    """
+    Forces model load + first-token path to run once.
+    Helps avoid first-turn latency spikes in sims.
+    """
+    warm_messages = [
+        {"role": "system", "content": "You are online. Reply with 'ready'."},
+        {"role": "user", "content": "ping"},
+    ]
+    for _ in engine.chat_stream(warm_messages):
+        pass
 
 
 # =============================================================================
@@ -178,15 +234,18 @@ def run_turn(*, req: TurnRequest, cfg: RuntimeConfig, engine: Any, npc=None, db=
         db.init_db()
         _ensure_default_state(db, cfg)
 
-        user_input = req.user_input.strip()
+        user_input = (req.user_input or "").strip()
         if not user_input:
             return TurnResult(npc_name, True, None, False, None, False, False)
+
+        # request overrides (so demos can drive the runtime cleanly)
+        channel = req.channel or cfg.channel
 
         cmd = handle_command(user_input, npc=npc, npc_db=db)
         if cmd.handled:
             return TurnResult(npc_name, True, cmd.response, cmd.should_exit, None, False, False)
 
-        db.add_event("user", user_input, meta={"channel": cfg.channel})
+        db.add_event("user", user_input, meta={"channel": channel})
 
         recent = db.get_recent_events(cfg.default_history_limit)
         state = _state_snapshot(db, cfg)
@@ -204,22 +263,35 @@ def run_turn(*, req: TurnRequest, cfg: RuntimeConfig, engine: Any, npc=None, db=
         if cfg.debug_assert_messages_valid:
             _assert_messages_valid(messages)
 
-        chunks: List[str] = []
+        # Tools only active if promoted
+        tools = runtime.available_tools if (runtime and runtime.promote_tools) else []
+        handlers = cfg.tool_executor_builder() if (cfg.tool_executor_builder and tools) else {}
+        schemas = {t.name: (t.schema or {}) for t in tools}
+        tool_runtime = ToolRuntime(handlers=handlers, schemas=schemas) if tools else None
 
-        if req.stream_callback:
-            for token in engine.chat_stream(messages):
-                chunks.append(token)
-                req.stream_callback(token)
-        else:
-            for token in engine.chat_stream(messages):
-                chunks.append(token)
+        reply, _final_messages = run_with_tools(
+            engine=engine,
+            messages=messages,
+            tool_runtime=tool_runtime,
+            max_tool_steps=5,
+            stream_callback=req.stream_callback,
+            add_event=lambda role, content, meta: db.add_event(role, content, meta=meta),
+            channel=channel,
+        )
 
-        reply = "".join(chunks).strip() or "No Output"
-
-        db.add_event("assistant", reply, meta={"channel": cfg.channel})
+        db.add_event("assistant", reply, meta={"channel": channel})
         EpisodicPromoter(db).promote()
 
-        return TurnResult(npc_name, False, None, False, reply, True, True)
+        return TurnResult(
+            npc_name=npc_name,
+            handled_by_system1=False,
+            system1_response=None,
+            should_exit=False,
+            assistant_reply=reply,
+            wrote_user_event=True,
+            wrote_assistant_event=True,
+            compiled_messages=messages,
+        )
 
     except Exception as e:
         return TurnResult("NPC", False, None, False, None, False, False, error=str(e))
@@ -232,6 +304,8 @@ def run_turn(*, req: TurnRequest, cfg: RuntimeConfig, engine: Any, npc=None, db=
 def run_cli(npc_dir: str):
     cfg = RuntimeConfig()
     engine = build_engine(cfg)
+    warm_engine(engine)
+
     npc = load_npc(npc_dir)
     db = NPCDatabase(npc.paths.db)
     db.init_db()
