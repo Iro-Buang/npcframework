@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .Runtime_Orchestrator import FINALIZE_SYSTEM_PROMPT
+
 """
 NPCFramework - Runtime Prompt Compiler
 
@@ -41,7 +43,8 @@ BULLET_PREFIX = "- "
 
 # Tool call syntax (contract with your runtime)
 TOOL_CALL_PREFIX = "/tool_call"
-TOOL_CALL_FORMAT = f"{TOOL_CALL_PREFIX} <tool_name> <json_payload>"
+TOOL_CALL_FORMAT = f'{TOOL_CALL_PREFIX} {{"name":"<tool_name>","args":{{...}}}}'
+
 
 # Tool help formatting
 MAX_TOOL_EXAMPLES = 3
@@ -213,11 +216,19 @@ def build_tool_instructions(inj: RuntimeInjection) -> str:
         _h("TOOL USE INSTRUCTIONS"),
         "Tools are only available if listed below.",
         "",
-        "To call a tool:",
-        f"- Start your response with: {TOOL_CALL_FORMAT}",
-        "- Use valid JSON only.",
-        "Tool arguments must be taken exactly from the user’s request. Do not transform, estimate, or substitute numbers.",
-        "- Do not include commentary before or after the tool call.",
+        "When you need to use a tool, you MUST output exactly ONE LINE in this format:",
+        f"{TOOL_CALL_PREFIX} {{\"name\":\"<tool_name>\",\"args\":{{...}}}}",
+        "",
+        "Rules:",
+        "- Do NOT add any other text before or after the tool call.",
+        "- args MUST be a JSON object. Use {} if there are no args.",
+        "- Use ONLY tool names from the list below.",
+        "",
+        "EXAMPLES:",
+        "User: Use a tool to get the time",
+        f"Assistant: {TOOL_CALL_PREFIX} {{\"name\":\"time_now\",\"args\":{{}}}}",
+        "User: Add 5 and 7",
+        f"Assistant: {TOOL_CALL_PREFIX} {{\"name\":\"add\",\"args\":{{\"a\":5,\"b\":7}}}}",
         "",
         "Available Tools:",
     ]
@@ -428,6 +439,17 @@ def events_to_messages(events: List[Event]) -> List[Message]:
     for e in events:
         role = e.role if e.role in ALLOWED_EVENT_ROLES else "user"
         content = e.content if isinstance(e.content, str) else str(e.content)
+
+        # 🚫 Don't replay orchestration plumbing into the model
+        if role == "system":
+            s = (content or "").strip()
+            if s.startswith("/tool_call") or s.startswith("/tool_result"):
+                continue
+            if s == FINALIZE_SYSTEM_PROMPT:
+                continue
+            if s.startswith("tool_call_parse_error:"):
+                continue
+
         msgs.append({"role": role, "content": content})
     return msgs
 

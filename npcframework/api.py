@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Optional, Dict, Callable
+import time
 
 from .npcframework_types import (
     EngineConfig,
@@ -13,7 +15,7 @@ from .npcframework_types import (
 )
 
 # Inference backends
-from .inference.llamacpp import LlamaCppEngine, LlamaCppConfig
+# NOTE: keep heavy deps (llama_cpp) optional by importing lazily.
 from .inference.mock import MockEngine
 
 # Core internals (package-safe)
@@ -27,6 +29,14 @@ from npcframework.core.Runtime_Prompt_Compiler import (
 from npcframework.core.Runtime_Commands import handle_command
 from npcframework.core.NPC_DB_Episodic_Promoter import EpisodicPromoter
 from npcframework.core.Runtime_Orchestrator import run_with_tools, ToolRuntime
+
+from .debug_dump import dump_messages
+
+@dataclass
+class RuntimeConfig:
+    debug_dump_messages_json: bool = False
+    debug_dump_messages_txt: bool = False
+    debug_dump_dir: Optional[str] = None
 
 
 # =============================================================================
@@ -46,6 +56,12 @@ class Engine:
 
     def _build_backend(self, cfg: EngineConfig) -> InferenceEngine:
         if cfg.backend == "llamacpp":
+            try:
+                from .inference.llamacpp import LlamaCppEngine, LlamaCppConfig  # type: ignore
+            except Exception as e:
+                raise RuntimeError(
+                    "llamacpp backend requires llama-cpp-python. Install it, or use backend='mock'."
+                ) from e
             llama_cfg = LlamaCppConfig(
                 model_path=cfg.model_path,
                 n_ctx=cfg.n_ctx,
@@ -90,9 +106,19 @@ class Session:
         npc_dir: str,
         cfg: Optional[SessionConfig] = None,
         db: Optional[NPCDatabase] = None,
+        runtime_cfg: Optional[RuntimeConfig] = None,   # ✅ NEW
     ) -> None:
         self.engine = engine
         self.cfg = cfg or SessionConfig()
+
+        # ✅ NEW: runtime_cfg overrides SessionConfig for debug dumping only
+        if runtime_cfg is not None:
+            if runtime_cfg.debug_dump_messages_json is not None:
+                self.cfg.debug_dump_messages_json = runtime_cfg.debug_dump_messages_json
+            if runtime_cfg.debug_dump_messages_txt is not None:
+                self.cfg.debug_dump_messages_txt = runtime_cfg.debug_dump_messages_txt
+            if runtime_cfg.debug_dump_dir is not None:
+                self.cfg.debug_dump_dir = runtime_cfg.debug_dump_dir
 
         # --- Load NPC
         self.npc = load_npc(npc_dir)
@@ -132,6 +158,22 @@ class Session:
     # -----------------------
     # Turn runner
     # -----------------------
+
+    def _compile_messages(self, *, inj: RuntimeInjection) -> list[dict[str, str]]:
+        """Compile the message list that will be passed to the inference backend."""
+        recent = self.db.get_recent_events(self.cfg.history_limit)
+        return compile_messages(
+            identity=self.npc.identity,
+            persona=self.npc.persona,
+            policy=self.npc.policy,
+            recent_events=recent,
+            runtime=inj,
+            options=CompileOptions(
+                history_limit=self.cfg.history_limit,
+                include_state=self.cfg.include_state_in_prompt,
+                include_tools=self.cfg.include_tools_in_prompt,
+            ),
+        )
 
     def run_turn(self, turn: TurnInput) -> TurnResult:
         """
@@ -200,23 +242,31 @@ class Session:
             # -----------------------
             # Prompt compilation
             # -----------------------
-            recent = self.db.get_recent_events(self.cfg.history_limit)
-            messages = compile_messages(
-                identity=self.npc.identity,
-                persona=self.npc.persona,
-                policy=self.npc.policy,
-                recent_events=recent,
-                runtime=inj,
-                options=CompileOptions(
-                    history_limit=self.cfg.history_limit,
-                    include_state=self.cfg.include_state_in_prompt,
-                    include_tools=self.cfg.include_tools_in_prompt,
-                ),
-            )
+            messages = self._compile_messages(inj=inj)
             trace.compiled_messages = messages
 
             if self.cfg.debug_assert_messages_valid:
                 _assert_messages_valid(messages)
+
+            # -----------------------
+            # Debug dumps (what goes into the model)
+            # -----------------------
+            if self.cfg.debug_dump_messages_json or self.cfg.debug_dump_messages_txt:
+                turn_id = str(int(time.time() * 1000))
+                dump_messages(
+                    messages=messages,
+                    out_dir=self.cfg.debug_dump_dir,
+                    turn_id=turn_id,
+                    write_json=self.cfg.debug_dump_messages_json,
+                    write_txt=self.cfg.debug_dump_messages_txt,
+                    meta={
+                        "npc": self.npc_name,
+                        "channel": self.cfg.channel,
+                        "history_limit": self.cfg.history_limit,
+                        "include_state": self.cfg.include_state_in_prompt,
+                        "include_tools": self.cfg.include_tools_in_prompt,
+                    },
+                )
 
             # -----------------------
             # Tool runtime (caller-owned)
@@ -239,6 +289,7 @@ class Session:
                 stream_callback=turn.stream_callback,
                 add_event=lambda role, content, meta=None: self.db.add_event(role, content, meta=meta),
                 channel=self.cfg.channel,
+                user_input=turn.user_input,  # ✅ FIXED
             )
 
             # -----------------------
@@ -260,7 +311,6 @@ class Session:
                 trace=trace,
                 error=str(e),
             )
-
 
 # =============================================================================
 # Debug helpers

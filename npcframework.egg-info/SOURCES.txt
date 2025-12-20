@@ -4,6 +4,8 @@ pyproject.toml
 npcframework/__init__.py
 npcframework/api.py
 npcframework/cli.py
+npcframework/config.py
+npcframework/debug_dump.py
 npcframework/main.py
 npcframework/npcframework_types.py
 npcframework.egg-info/PKG-INFO
@@ -21,6 +23,7 @@ npcframework/core/Runtime_Inference_LlamaCPP.py
 npcframework/core/Runtime_Inference_Mock.py
 npcframework/core/Runtime_Orchestrator.py
 npcframework/core/Runtime_Prompt_Compiler.py
+npcframework/core/backup orchestrator.py
 npcframework/inference/__init__.py
 npcframework/inference/llamacpp.py
 npcframework/inference/mock.py

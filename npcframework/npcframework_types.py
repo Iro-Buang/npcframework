@@ -80,6 +80,14 @@ class SessionConfig:
     # debugging (library should not print, but caller can opt into returning debug data)
     debug_assert_messages_valid: bool = True
 
+    # debug dumps (what gets sent to the model)
+    # - messages_json: structured list of {role, content}
+    # - messages_txt: readable transcript for quick inspection
+    # Dumps are written per-turn when enabled.
+    debug_dump_dir: str = ".npc/debug"
+    debug_dump_messages_json: bool = False
+    debug_dump_messages_txt: bool = False
+
     # default NPC state seeding
     default_state_mode: str = "idle"
     default_state_mood: str = "neutral"

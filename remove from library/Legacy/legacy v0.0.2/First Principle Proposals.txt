@@ -1,9 +1,0 @@
-First Principle Proposals
-- Domain Specific Deterministic Algorithms Outperform Probabilistic Models
-- Entities Possess Identifiable Features That Distinguish Them From Other Entities
-- Memories are Events Experienced by an Entity, From its Perspective
-- An Entity's Behavior is Influenced by its Experienced Events
-
-Tenet Proposals
-- Memory is experience, not context.
-	NPCFramework models memory as structured events that happened to an NPC rather than as unexamined conversation history, blobs of information, or embeddings

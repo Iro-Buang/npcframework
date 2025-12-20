@@ -197,7 +197,7 @@ def _build_runtime_injection(
         environment_rules=req.env_rules or cfg.runtime_env_rules,
         state=runtime_state,
         perception_facts=req.perception_facts or cfg.runtime_perception_facts,
-        promote_tools=_should_promote_tools(user_input, cfg),
+        promote_tools=promote,
         available_tools=tools,
 
         additional_policies=req.additional_policies or cfg.runtime_additional_policies,
@@ -325,6 +325,8 @@ def run_turn(*, req: TurnRequest, cfg: RuntimeConfig, engine: Any, npc=None, db=
             stream_callback=req.stream_callback,
             add_event=lambda role, content, meta: db.add_event(role, content, meta=meta),
             channel=channel,
+            user_input=req.user_input,
+
         )
 
         db.add_event("assistant", reply, meta={"channel": channel})
