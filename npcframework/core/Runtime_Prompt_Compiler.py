@@ -91,6 +91,7 @@ class RuntimeInjection:
     # TOOLS (conditionally promoted)
     available_tools: List[ToolSpec] = field(default_factory=list)
     tool_promotion_reason: Optional[str] = None  # debug only; not injected by default
+    tool_prompt_style: str = "compact"
     promote_tools: bool = False
 
     # IDENTITY append (role/skin, not rewrite)
@@ -101,6 +102,10 @@ class RuntimeInjection:
 
     # POLICIES append
     additional_policies: List[str] = field(default_factory=list)
+
+    # GOALS append
+    existential_goals: List[str] = field(default_factory=list)
+    transient_goals: List[str] = field(default_factory=list)
 
     # STATE snapshot
     state: Dict[str, Any] = field(default_factory=dict)
@@ -120,6 +125,24 @@ class RuntimeInjection:
 # =============================================================================
 # GENERIC HELPERS
 # =============================================================================
+
+
+def build_goals_block(inj: RuntimeInjection) -> str:
+    ex = _safe_lines(inj.existential_goals)
+    tr = _safe_lines(inj.transient_goals)
+
+    if not (ex or tr):
+        return ""
+
+    lines: List[str] = [_h("GOALS")]
+
+    if ex:
+        lines += ["Existential Goals (npc-defined):", _bullet(ex), ""]
+    if tr:
+        lines += ["Transient Goals (environment/app-injected):", _bullet(tr), ""]
+
+    return "\n".join(lines).strip()
+
 
 def _h(title: str) -> str:
     bar = HEADER_CHAR * HEADER_LINE_LEN
@@ -209,46 +232,94 @@ def build_environment_instructions(inj: RuntimeInjection) -> str:
 
 
 def build_tool_instructions(inj: RuntimeInjection) -> str:
+    # Hard off switch
+    style = (inj.tool_prompt_style or "compact").strip().lower()
+    if style == "none":
+        return ""
     if not inj.promote_tools or not inj.available_tools:
         return ""
 
-    lines: List[str] = [
-        _h("TOOL USE INSTRUCTIONS"),
-        "Tools are only available if listed below.",
-        "",
-        "When you need to use a tool, you MUST output exactly ONE LINE in this format:",
-        f"{TOOL_CALL_PREFIX} {{\"name\":\"<tool_name>\",\"args\":{{...}}}}",
-        "",
-        "Rules:",
-        "- Do NOT add any other text before or after the tool call.",
-        "- args MUST be a JSON object. Use {} if there are no args.",
-        "- Use ONLY tool names from the list below.",
-        "",
-        "EXAMPLES:",
-        "User: Use a tool to get the time",
-        f"Assistant: {TOOL_CALL_PREFIX} {{\"name\":\"time_now\",\"args\":{{}}}}",
-        "User: Add 5 and 7",
-        f"Assistant: {TOOL_CALL_PREFIX} {{\"name\":\"add\",\"args\":{{\"a\":5,\"b\":7}}}}",
-        "",
-        "Available Tools:",
-    ]
+    # ----------------------------
+    # COMPACT MODE (recommended default)
+    # ----------------------------
+    if style == "compact":
+        lines: List[str] = [
+            _h("TOOL USE"),
+            "Tools may be used ONLY if needed to answer the user accurately.",
+            "If you do not need a tool, reply normally.",
+            "",
+            "To call a tool, output exactly ONE LINE in this format:",
+            f'{TOOL_CALL_PREFIX} {{"name":"<tool_name>","args":{{}}}}',
+            "",
+            "Rules:",
+            "- No extra text before or after the tool call line.",
+            "- args MUST be a JSON object ({} if none).",
+            "- Use only tool names listed below.",
+            "",
+            "Available Tools:",
+        ]
+        for t in inj.available_tools:
+            lines.append(f"- {t.name}: {t.description}")
 
-    for t in inj.available_tools:
-        lines.append(f"{t.name}: {t.description}")
-        lines.append("Schema:")
-        lines.append(_as_str(t.schema))
+        # Optional: add one negative constraint that stops clock spam
+        lines += [
+            "",
+            "Important:",
+            "- Do NOT mention the current time/date unless explicitly asked or you are calling a time/date tool."
+        ]
 
-        if t.few_shots:
-            lines.append("Examples:")
-            for ex in t.few_shots[:MAX_TOOL_EXAMPLES]:
-                inp = ex.get("input", "")
-                outp = ex.get("output", "")
-                lines.append(f"- Input: {inp}")
-                lines.append(f"  Output: {outp}")
+        return "\n".join(lines).strip()
 
-        lines.append("")  # spacer between tools
+    # ----------------------------
+    # FULL MODE (verbose; for dev / agent mode)
+    # ----------------------------
+    if style == "full":
+        lines: List[str] = [
+            _h("TOOL USE INSTRUCTIONS"),
+            "Tools are only available if listed below.",
+            "",
+            "When you need to use a tool, you MUST output exactly ONE LINE in this format:",
+            f'{TOOL_CALL_PREFIX} {{"name":"<tool_name>","args":{{}}}}',
+            "",
+            "Rules:",
+            "- Do NOT add any other text before or after the tool call.",
+            "- args MUST be a JSON object. Use {} if there are no args.",
+            "- Use ONLY tool names from the list below.",
+            "- If you call a tool, your entire assistant output must be ONLY that one tool_call line.",
+            "",
+            # Keep examples ONLY in full mode
+            "EXAMPLES:",
+            "User: Use a tool to get the time",
+            f'Assistant: {TOOL_CALL_PREFIX} {{"name":"time_now","args":{{}}}}',
+            "User: Add 5 and 7",
+            f'Assistant: {TOOL_CALL_PREFIX} {{"name":"add","args":{{"a":5,"b":7}}}}',
+            "",
+            "Available Tools:",
+        ]
 
-    return "\n".join(lines).strip()
+        for t in inj.available_tools:
+            lines.append(f"{t.name}: {t.description}")
+
+            # Schema can be useful in full mode, but still consider trimming later
+            if t.schema:
+                lines.append("Schema:")
+                lines.append(_as_str(t.schema))
+
+            if t.few_shots:
+                lines.append("Examples:")
+                for ex in t.few_shots[:MAX_TOOL_EXAMPLES]:
+                    inp = ex.get("input", "")
+                    outp = ex.get("output", "")
+                    lines.append(f"- Input: {inp}")
+                    lines.append(f"  Output: {outp}")
+
+            lines.append("")  # spacer between tools
+
+        return "\n".join(lines).strip()
+
+    # Fallback: treat unknown style as compact (safe default)
+    inj.tool_prompt_style = "compact"
+    return build_tool_instructions(inj)
 
 
 def build_identity_block(identity: Dict[str, Any], inj: RuntimeInjection) -> str:
@@ -375,17 +446,26 @@ def build_memory_block(inj: RuntimeInjection) -> str:
     return "\n".join(lines).strip()
 
 
-def build_decision_action_block(inj: RuntimeInjection) -> str:
-    rule = inj.decision_rule or (
-        "Given all of the above details and the last user input, decide whether to reply conversationally or call a tool.\n"
-        "If a tool call is required:\n"
-        f"- Start the reply with {TOOL_CALL_PREFIX} and follow the tool use instructions exactly.\n"
-        "If no tool call is required:\n"
-        "- Reply conversationally in character.\n"
-        "Do not narrate, explain, or justify your decision.\n"
-        "Only act."
-    )
+def build_decision_action_block(inj: RuntimeInjection, options: CompileOptions) -> str:
+    tools_active = bool(options.include_tools and inj.promote_tools and inj.available_tools and inj.tool_prompt_style != "none")
+
+    if not tools_active:
+        rule = (
+            "Given the above details and the last user input, reply conversationally in character.\n"
+            "Do not mention tools. Do not output /tool_call.\n"
+            "Do not narrate internal reasoning.\n"
+        )
+    else:
+        rule = (
+            "Given all of the above details and the last user input, decide whether to reply conversationally or call a tool.\n"
+            f"If a tool call is required, output exactly one line starting with {TOOL_CALL_PREFIX}.\n"
+            "If no tool call is required, reply conversationally in character.\n"
+            "Do not narrate, explain, or justify your decision.\n"
+            "Only act."
+        )
+
     return "\n".join([_h("DECISION AND ACTION INSTRUCTIONS"), rule]).strip()
+
 
 
 def build_system_prompt(
@@ -408,7 +488,14 @@ def build_system_prompt(
 
     parts.append(build_identity_block(identity, inj))
     parts.append(build_persona_block(persona, inj))
+
+    # Policies should appear ONCE, after identity/persona
     parts.append(build_policy_block(policy, inj))
+
+    # Goals can come after policies (good spot)
+    goals_block = build_goals_block(inj)
+    if goals_block:
+        parts.append(goals_block)
 
     if options.include_state:
         state_block = build_state_block(inj)
@@ -425,9 +512,10 @@ def build_system_prompt(
         if mem_block:
             parts.append(mem_block)
 
-    parts.append(build_decision_action_block(inj))
+    parts.append(build_decision_action_block(inj, options))
 
     return "\n\n".join([p for p in parts if p and p.strip()]).strip()
+
 
 
 # =============================================================================

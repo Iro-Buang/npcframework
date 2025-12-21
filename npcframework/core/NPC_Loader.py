@@ -29,6 +29,7 @@ class NPCBundle:
     identity: YamlDict
     persona: YamlDict
     policy: YamlDict
+    goals: YamlDict
     memory: YamlDict
     kernel: YamlDict
     actions: YamlDict
@@ -91,7 +92,33 @@ def _require_dict(obj: YamlDict, key: str, *, where: str) -> YamlDict:
 # Loader
 # -----------------------------
 
-REQUIRED_DOC_KEYS = ("identity", "persona", "policy", "memory", "kernel", "actions", "tools")
+REQUIRED_DOC_KEYS = ("identity", "persona", "policy", "goals", "memory", "kernel", "actions", "tools")
+
+def extract_existential_goals(goals_yaml: dict) -> list[str]:
+    raw = goals_yaml.get("existential", [])
+    out: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                out.append(item.strip())
+            elif isinstance(item, dict):
+                text = item.get("text", "")
+                if isinstance(text, str) and text.strip():
+                    out.append(text.strip())
+    return out
+
+def parse_existential_goals(goals_yaml: dict) -> list[str]:
+    raw = goals_yaml.get("existential", [])
+    out: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                out.append(item.strip())
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    out.append(text.strip())
+    return out
 
 
 def load_npc(npc_dir: Union[str, Path]) -> NPCBundle:
@@ -142,6 +169,7 @@ def load_npc(npc_dir: Union[str, Path]) -> NPCBundle:
     identity = _load_yaml(resolved_files["identity"])
     persona = _load_yaml(resolved_files["persona"])
     policy = _load_yaml(resolved_files["policy"])
+    goals = _load_yaml(resolved_files["goals"])
     memory = _load_yaml(resolved_files["memory"])
     kernel = _load_yaml(resolved_files["kernel"])
     actions = _load_yaml(resolved_files["actions"])
@@ -159,6 +187,7 @@ def load_npc(npc_dir: Union[str, Path]) -> NPCBundle:
         identity=identity,
         persona=persona,
         policy=policy,
+        goals=goals,
         memory=memory,
         kernel=kernel,
         actions=actions,

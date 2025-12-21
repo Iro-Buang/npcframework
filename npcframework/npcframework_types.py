@@ -88,6 +88,9 @@ class SessionConfig:
     debug_dump_messages_json: bool = False
     debug_dump_messages_txt: bool = False
 
+    include_perception_in_prompt: bool = True
+    include_memory_in_prompt: bool = True
+
     # default NPC state seeding
     default_state_mode: str = "idle"
     default_state_mood: str = "neutral"
@@ -121,9 +124,17 @@ class TurnInput:
     environment_facts: Optional[List[str]] = None
     environment_rules: Optional[List[str]] = None
     perception_facts: Optional[List[str]] = None
+    transient_goals: Optional[List[str]] = None
+
+    working_memory: Optional[List[str]] = None
+    recalled_contexts: Optional[List[str]] = None
+    semantic_memory: Optional[List[str]] = None
 
     # state injection (merged with session snapshot; app/world owns truth here)
     external_state: Optional[Dict[str, Any]] = None
+
+    include_perception_in_prompt: bool = True
+    include_memory_in_prompt: bool = True
 
     # policy/identity extensions (caller controlled)
     additional_policies: Optional[List[str]] = None
@@ -132,9 +143,14 @@ class TurnInput:
     # tools (caller controlled: trust boundary lives here)
     available_tools: Optional[List[ToolSpec]] = None
     tool_handlers: Optional[ToolHandlers] = None
+    include_tools_in_prompt: Optional[bool] = None
+    tool_prompt_style: str = "compact"
 
     # streaming
     stream_callback: Optional[StreamCallback] = None
+
+    allow_spontaneous_tools: bool = False
+
 
 
 @dataclass

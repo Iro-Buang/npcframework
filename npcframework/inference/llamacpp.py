@@ -4,12 +4,23 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 import re
 
-from llama_cpp import Llama
+try:
+    from llama_cpp import Llama
+except ImportError as e:
+    raise ImportError(
+        "LlamaCPP backend requires optional dependency.\n"
+        "Install with:\n"
+        "  pip install npcframework[llamacpp]\n"
+        "or editable:\n"
+        "  pip install -e '.[llamacpp]'"
+    ) from e
 
 Message = Dict[str, str]
 
-# Compile once, not inside a function
-_SPEAKER_RE = re.compile(r"^\s*(Kevin\s*>|KEVIN\s*>|Kevin>|KEVIN>)\s*")
+# ✅ Generic: strip prefixes like "Kevin>", "Anna >", "NPC-01>"
+_SPEAKER_RE = re.compile(r"^\s*[A-Za-z0-9_-]{1,32}\s*>\s*")
+
+
 
 
 @dataclass

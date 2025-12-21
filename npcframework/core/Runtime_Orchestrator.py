@@ -28,7 +28,7 @@ class ToolRuntime:
     validate_call: Optional[ToolValidator] = None
 
 
-def parse_tool_call(text: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+def parse_tool_call(text: str, *, relaxed: bool = False) -> Optional[Tuple[str, Dict[str, Any]]]:
     """
     Robust tool-call parser.
 
@@ -47,13 +47,17 @@ def parse_tool_call(text: str) -> Optional[Tuple[str, Dict[str, Any]]]:
 
     s = text.strip()
 
-    # ✅ NEW: allow /tool_call anywhere (Gemma loves to preface with chatter)
+    # Strict mode: tool call must be the entire assistant output line
     if not s.startswith(TOOL_CALL_PREFIX):
+        if not relaxed:
+            return None
+
+        # Relaxed mode: scan for a tool_call line somewhere inside
         lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
         hit = next((ln for ln in lines if ln.startswith(TOOL_CALL_PREFIX)), None)
         if not hit:
             return None
-        s = hit  # parse only the tool_call line
+        s = hit
 
     payload = s[len(TOOL_CALL_PREFIX):].strip()
     if not payload:
@@ -252,12 +256,50 @@ def run_with_tools(
     channel: str = "runtime",
     user_input: str = "",
     turn_id: Optional[str] = None,
+    # ✅ NEW: prevent DB duplicate writes by letting Session own assistant final logging
+    log_final_answer_event: bool = True,
+    # ✅ NEW: if True, after a successful tool call we refuse any further tool calls and force finalize
+    hard_stop_after_successful_tool: bool = True,
+    # ✅ NEW: allow tools even when user did NOT ask (simulation/agent mode)
+    allow_spontaneous_tools: bool = False,
 ) -> Tuple[str, List[Message]]:
-    """Run inference with tool-call support + deterministic autorun + canonical answer enforcement."""
+    """Run inference with tool-call support + deterministic autorun + canonical answer enforcement.
+
+    Behavioral gates:
+    - Tools are allowed if (user demanded tool) OR (allow_spontaneous_tools=True).
+    - Autorun heuristic triggers ONLY when user demanded a tool.
+    - If model tool-calls when tools are NOT allowed, we block and force a normal answer.
+    - If hard_stop_after_successful_tool=True and a tool already succeeded, we block further tool calls.
+    """
+
     if turn_id is None:
         turn_id = f"turn_{int(time.time() * 1000)}"
 
+    # ------------------------
+    # Helpers
+    # ------------------------
+
+    def _log(kind: str, content: str, meta: Dict[str, Any]) -> None:
+        if add_event:
+            add_event("system", content, {"channel": channel, "kind": kind, "turn_id": turn_id, **meta})
+
+    def _log_assistant_final(text: str) -> None:
+        if add_event and log_final_answer_event:
+            add_event("assistant", text, {"channel": channel, "kind": "final_answer", "turn_id": turn_id})
+
+    def _finalize_and_return(text: str) -> Tuple[str, List[Message]]:
+        final_text = (text or "").strip() or "No Output"
+        if canonical_answer is not None and canonical_answer not in final_text:
+            final_text = canonical_answer
+
+        if stream_callback:
+            stream_callback(final_text)
+
+        _log_assistant_final(final_text)
+        return final_text, messages
+
     def _try_autorun_tool_from_user_input() -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Tiny heuristic: only for cases where user explicitly demands a tool."""
         if not tool_runtime or not tool_runtime.handlers:
             return None
 
@@ -271,144 +313,169 @@ def run_with_tools(
             import re
             m = re.search(r"(-?\d+)\s*\+\s*(-?\d+)", ul)
             if m:
-                a = int(m.group(1))
-                b = int(m.group(2))
-                return ("add", {"a": a, "b": b})
+                return ("add", {"a": int(m.group(1)), "b": int(m.group(2))})
 
         return None
 
-    tool_step = 0
-    enforced_once = False
-    tool_executed = False
-    tool_required = _user_demands_tool(user_input)
+    def _execute_tool(
+        tool_name: str,
+        args: Dict[str, Any],
+        tool_step: int,
+    ) -> Tuple[bool, Any, Optional[str], int, str]:
+        """Exec tool with validation + standardized tool_result text."""
+        started = time.time()
+        ok = True
+        result: Any = None
+        error: Optional[str] = None
 
-    # ✅ NEW: carry canonical answer across the whole turn
-    canonical_answer: Optional[str] = None
+        try:
+            if not tool_runtime or tool_name not in tool_runtime.handlers:
+                raise ValueError(f"unknown tool: {tool_name}")
 
-    # Helper: enforce canonical answer right before returning
-    def _finalize_and_return(text: str) -> Tuple[str, List[Message]]:
-        final_text = text
-        if canonical_answer is not None and canonical_answer not in (final_text or ""):
-            final_text = canonical_answer
+            schema = tool_runtime.schemas.get(tool_name) if tool_runtime else None
+            validate_args(schema, args)
+            result = tool_runtime.handlers[tool_name](args)
+        except Exception as e:
+            ok = False
+            error = str(e)
 
-        if stream_callback:
-            stream_callback(final_text)
-        if add_event:
-            add_event("assistant", final_text, {"channel": channel, "kind": "final_answer", "turn_id": turn_id})
-        return final_text, messages
+        latency_ms = int((time.time() - started) * 1000)
+        tool_result_text = format_tool_result(
+            tool_name,
+            ok=ok,
+            result=result,
+            error=error,
+            latency_ms=latency_ms,
+        )
+
+        _log(
+            "tool_result",
+            tool_result_text,
+            {"tool": tool_name, "tool_step": tool_step, "ok": ok, "latency_ms": latency_ms},
+        )
+
+        return ok, result, error, latency_ms, tool_result_text
 
     # ------------------------
-    # Autorun for obvious cases when user explicitly demands a tool
+    # State
+    # ------------------------
+
+    tool_step = 0
+    enforced_once = False
+    blocked_spontaneous_once = False
+
+    tool_executed = False          # a tool call happened (even if failed)
+    tool_succeeded = False         # at least one tool returned ok=True
+    tool_required = _user_demands_tool(user_input)
+
+    # Gate for tool availability this turn
+    tools_allowed = bool(tool_required or allow_spontaneous_tools)
+
+    canonical_answer: Optional[str] = None
+
+    # ------------------------
+    # Autorun (ONLY if tool is required)
     # ------------------------
     if tool_required:
         autorun = _try_autorun_tool_from_user_input()
         if autorun is not None:
             tool_name, args = autorun
 
-            if add_event:
-                add_event(
-                    "system",
-                    f"{TOOL_CALL_PREFIX} {tool_name} {json.dumps(args, ensure_ascii=False)}",
-                    {"channel": channel, "kind": "tool_call", "tool": tool_name, "turn_id": turn_id, "tool_step": 1},
-                )
+            _log(
+                "tool_call",
+                f"{TOOL_CALL_PREFIX} {tool_name} {json.dumps(args, ensure_ascii=False)}",
+                {"tool": tool_name, "tool_step": 1},
+            )
 
-            started = time.time()
-            ok = True
-            result: Any = None
-            error: Optional[str] = None
-
-            try:
-                if not tool_runtime or tool_name not in tool_runtime.handlers:
-                    raise ValueError(f"unknown tool: {tool_name}")
-                schema = tool_runtime.schemas.get(tool_name) if tool_runtime else None
-                validate_args(schema, args)
-                result = tool_runtime.handlers[tool_name](args)
-            except Exception as e:
-                ok = False
-                error = str(e)
-
-            latency_ms = int((time.time() - started) * 1000)
-            tool_result_text = format_tool_result(tool_name, ok=ok, result=result, error=error, latency_ms=latency_ms)
-
-            if add_event:
-                add_event(
-                    "system",
-                    tool_result_text,
-                    {
-                        "channel": channel,
-                        "kind": "tool_result",
-                        "tool": tool_name,
-                        "turn_id": turn_id,
-                        "tool_step": 1,
-                        "ok": ok,
-                        "latency_ms": latency_ms,
-                    },
-                )
+            ok, result, error, latency_ms, tool_result_text = _execute_tool(tool_name, args, tool_step=1)
 
             tool_executed = True
+            tool_succeeded = tool_succeeded or ok
 
-            # ✅ NEW: set canonical answer if extractable
-            canonical_answer = extract_canonical_answer(result)
+            extracted = extract_canonical_answer(result)
+            if extracted is not None:
+                canonical_answer = extracted
 
-            # ✅ IMPORTANT: inject the ACTUAL tool_result into messages, so the model can see it
-            messages = messages + [
-                {"role": "system", "content": tool_result_text},
-            ]
+            # model must see tool_result
+            messages = messages + [{"role": "system", "content": tool_result_text}]
 
-            # If we have a canonical answer, tell model it must include it verbatim
+            # reinforce canonical answer
             if canonical_answer is not None:
-                messages = messages + [
-                    {
-                        "role": "system",
-                        "content": (
-                            "A tool has produced an authoritative answer.\n"
-                            "You MUST preserve the following value EXACTLY.\n\n"
-                            f"CANONICAL_ANSWER: {canonical_answer}\n\n"
-                            "Rules:\n"
-                            "- You may add style, tone, or commentary.\n"
-                            "- You MUST include the canonical answer verbatim.\n"
-                            "- Do NOT change numbers, times, or wording.\n"
-                        ),
-                    }
-                ]
+                messages = messages + [{
+                    "role": "system",
+                    "content": (
+                        "A tool has produced an authoritative answer.\n"
+                        "You MUST preserve the following value EXACTLY.\n\n"
+                        f"CANONICAL_ANSWER: {canonical_answer}\n\n"
+                        "Rules:\n"
+                        "- You may add style, tone, or commentary.\n"
+                        "- You MUST include the canonical answer verbatim.\n"
+                        "- Do NOT change numbers, times, or wording.\n"
+                    ),
+                }]
 
-            messages = messages + [
-                {"role": "system", "content": FINALIZE_SYSTEM_PROMPT},
-            ]
-            # Continue into loop; final answer will be canonical-enforced at return.
+            messages = messages + [{"role": "system", "content": FINALIZE_SYSTEM_PROMPT}]
+            # Continue into model call for final answer; spiral guard below will stop further tools if configured.
 
     # ------------------------
-    # Main loop: model-driven tool calls
+    # Main loop
     # ------------------------
     while True:
-        if tool_step > max_tool_steps:
+        if tool_step >= max_tool_steps:
+            # If we already have canonical, return it instead of dying noisily.
+            if canonical_answer is not None:
+                return _finalize_and_return(canonical_answer)
             raise RuntimeError("tool loop exceeded max_tool_steps (possible infinite loop)")
 
+        # model response
         chunks: List[str] = []
         for token in engine.chat_stream(messages):
             chunks.append(token)
-        assistant_text = "".join(chunks).strip() or "No Output"
+        assistant_text = ("".join(chunks)).strip() or "No Output"
 
+        # parse tool call
         try:
-            tc = parse_tool_call(assistant_text)
+            # Relaxed only if you explicitly allow it (agent/sim mode),
+            # or if you want to be forgiving while bootstrapping.
+            tc = parse_tool_call(
+                assistant_text,
+                relaxed=allow_spontaneous_tools  # or (tool_required and not enforced_once) if you want
+            )
         except Exception as e:
-            if add_event:
-                add_event(
-                    "system",
-                    f"tool_call_parse_error: {str(e)}",
-                    {"channel": channel, "kind": "tool_error", "turn_id": turn_id, "tool_step": tool_step},
-                )
+            _log("tool_error", f"tool_call_parse_error: {str(e)}", {"tool_step": tool_step})
             tc = None
 
-        if not tc:
-            # Tool required but already executed => satisfied; just return (canonical enforced)
-            if tool_required and tool_executed:
-                return _finalize_and_return(assistant_text)
+        # ------------------------
+        # If model tried to tool-call but tools are NOT allowed this turn: block it
+        # ------------------------
+        if tc and not tools_allowed:
+            # We give the model ONE chance to comply and answer normally.
+            if not blocked_spontaneous_once:
+                blocked_spontaneous_once = True
+                messages = messages + [
+                    # keep its text so you can debug why it wanted a tool
+                    {"role": "assistant", "content": assistant_text},
+                    {"role": "system", "content": (
+                        "Tool calls are NOT allowed in this turn.\n"
+                        "Reply normally without calling any tool.\n"
+                        "Do NOT output /tool_call.\n"
+                    )},
+                ]
+                continue
 
-            # Tool required but none executed => enforce once then fail
-            if tool_required:
+            # If it insists, just return a safe answer.
+            return _finalize_and_return("ERROR: Tool call attempted but tools are disabled for this turn.")
+
+        # ------------------------
+        # No tool call detected
+        # ------------------------
+        if not tc:
+            # Tool required but not executed -> enforce once
+            if tool_required and not tool_executed:
                 if not tool_runtime or not tool_runtime.handlers:
-                    return _finalize_and_return("ERROR: Tool usage was requested, but no tools are available/registered for this turn.")
+                    return _finalize_and_return(
+                        "ERROR: Tool usage was requested, but no tools are available/registered for this turn."
+                    )
 
                 if not enforced_once:
                     enforced_once = True
@@ -420,43 +487,43 @@ def run_with_tools(
 
                 return _finalize_and_return("ERROR: Tool required, but the model refused to call it.")
 
-            # Normal completion
+            # Normal completion (canonical enforced)
             return _finalize_and_return(assistant_text)
 
-        # Tool call detected
-        tool_step += 1
+        # ------------------------
+        # Tool call detected (and allowed)
+        # ------------------------
         tool_name, args = tc
 
-        if add_event:
-            add_event(
-                "system",
-                f"{TOOL_CALL_PREFIX} {tool_name} {json.dumps(args, ensure_ascii=False)}",
-                {"channel": channel, "kind": "tool_call", "tool": tool_name, "turn_id": turn_id, "tool_step": tool_step},
-            )
+        # ✅ HARD SPIRAL STOP (only after a SUCCESSFUL tool)
+        if hard_stop_after_successful_tool and tool_succeeded:
+            if canonical_answer is not None:
+                return _finalize_and_return(canonical_answer)
+            return _finalize_and_return("Done. (A tool already succeeded; further tools are blocked.)")
 
-        # Validator hook
+        tool_step += 1
+
+        _log(
+            "tool_call",
+            f"{TOOL_CALL_PREFIX} {tool_name} {json.dumps(args, ensure_ascii=False)}",
+            {"tool": tool_name, "tool_step": tool_step},
+        )
+
+        # validator hook
         if tool_runtime and tool_runtime.validate_call:
             ok_v, err_v, patched = tool_runtime.validate_call(tool_name, args)
             if not ok_v:
-                tool_result_text = format_tool_result(tool_name, ok=False, result=None, error=err_v or "tool_call rejected", latency_ms=0)
-
-                if add_event:
-                    add_event(
-                        "system",
-                        tool_result_text,
-                        {
-                            "channel": channel,
-                            "kind": "tool_result",
-                            "tool": tool_name,
-                            "turn_id": turn_id,
-                            "tool_step": tool_step,
-                            "ok": False,
-                            "latency_ms": 0,
-                        },
-                    )
+                tool_result_text = format_tool_result(
+                    tool_name, ok=False, result=None, error=err_v or "tool_call rejected", latency_ms=0
+                )
+                _log(
+                    "tool_result",
+                    tool_result_text,
+                    {"tool": tool_name, "tool_step": tool_step, "ok": False, "latency_ms": 0},
+                )
 
                 tool_executed = True
-                # canonical stays as-is (no result)
+
                 messages = messages + [
                     {"role": "assistant", "content": assistant_text},
                     {"role": "system", "content": tool_result_text},
@@ -467,43 +534,12 @@ def run_with_tools(
             if patched is not None:
                 args = patched
 
-        started = time.time()
-        ok = True
-        result: Any = None
-        error: Optional[str] = None
-
-        try:
-            if not tool_runtime or tool_name not in tool_runtime.handlers:
-                raise ValueError(f"unknown tool: {tool_name}")
-            schema = tool_runtime.schemas.get(tool_name) if tool_runtime else None
-            validate_args(schema, args)
-            result = tool_runtime.handlers[tool_name](args)
-        except Exception as e:
-            ok = False
-            error = str(e)
-
-        latency_ms = int((time.time() - started) * 1000)
-        tool_result_text = format_tool_result(tool_name, ok=ok, result=result, error=error, latency_ms=latency_ms)
-
-        if add_event:
-            add_event(
-                "system",
-                tool_result_text,
-                {
-                    "channel": channel,
-                    "kind": "tool_result",
-                    "tool": tool_name,
-                    "turn_id": turn_id,
-                    "tool_step": tool_step,
-                    "ok": ok,
-                    "latency_ms": latency_ms,
-                },
-            )
+        ok, result, error, latency_ms, tool_result_text = _execute_tool(tool_name, args, tool_step=tool_step)
 
         tool_executed = True
+        tool_succeeded = tool_succeeded or ok
 
-        # ✅ NEW: update canonical answer after ANY tool result
-        # Only overwrite canonical_answer if we can extract one (keeps previous if None).
+        # update canonical answer if extractable
         new_canonical = extract_canonical_answer(result)
         if new_canonical is not None:
             canonical_answer = new_canonical
@@ -513,23 +549,19 @@ def run_with_tools(
             {"role": "system", "content": tool_result_text},
         ]
 
-        # If we have canonical answer, reinforce it in prompt (helps model comply)
+        # reinforce canonical
         if canonical_answer is not None:
-            messages = messages + [
-                {
-                    "role": "system",
-                    "content": (
-                        "A tool has produced an authoritative answer.\n"
-                        "You MUST preserve the following value EXACTLY.\n\n"
-                        f"CANONICAL_ANSWER: {canonical_answer}\n\n"
-                        "Rules:\n"
-                        "- You may add style, tone, or commentary.\n"
-                        "- You MUST include the canonical answer verbatim.\n"
-                        "- Do NOT change numbers, times, or wording.\n"
-                    ),
-                }
-            ]
+            messages = messages + [{
+                "role": "system",
+                "content": (
+                    "A tool has produced an authoritative answer.\n"
+                    "You MUST preserve the following value EXACTLY.\n\n"
+                    f"CANONICAL_ANSWER: {canonical_answer}\n\n"
+                    "Rules:\n"
+                    "- You may add style, tone, or commentary.\n"
+                    "- You MUST include the canonical answer verbatim.\n"
+                    "- Do NOT change numbers, times, or wording.\n"
+                ),
+            }]
 
-        messages = messages + [
-            {"role": "system", "content": FINALIZE_SYSTEM_PROMPT},
-        ]
+        messages = messages + [{"role": "system", "content": FINALIZE_SYSTEM_PROMPT}]

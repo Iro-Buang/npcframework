@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Dict, Callable
+from typing import Any, Optional, Dict
 import time
 
 from .npcframework_types import (
@@ -14,11 +14,8 @@ from .npcframework_types import (
     ToolHandlers,
 )
 
-# Inference backends
-# NOTE: keep heavy deps (llama_cpp) optional by importing lazily.
 from .inference.mock import MockEngine
 
-# Core internals (package-safe)
 from npcframework.core.NPC_Loader import load_npc
 from npcframework.core.NPC_DB_Manager import NPCDatabase
 from npcframework.core.Runtime_Prompt_Compiler import (
@@ -32,6 +29,7 @@ from npcframework.core.Runtime_Orchestrator import run_with_tools, ToolRuntime
 
 from .debug_dump import dump_messages
 
+
 @dataclass
 class RuntimeConfig:
     debug_dump_messages_json: bool = False
@@ -39,17 +37,7 @@ class RuntimeConfig:
     debug_dump_dir: Optional[str] = None
 
 
-# =============================================================================
-# Engine
-# =============================================================================
-
 class Engine:
-    """
-    Long-lived inference container (keeps model hot).
-
-    Owns ONLY the inference backend. No NPC knowledge.
-    """
-
     def __init__(self, cfg: EngineConfig) -> None:
         self.cfg = cfg
         self.backend: InferenceEngine = self._build_backend(cfg)
@@ -60,8 +48,11 @@ class Engine:
                 from .inference.llamacpp import LlamaCppEngine, LlamaCppConfig  # type: ignore
             except Exception as e:
                 raise RuntimeError(
-                    "llamacpp backend requires llama-cpp-python. Install it, or use backend='mock'."
+                    "llamacpp backend requires optional dependency.\n"
+                    "Install with: pip install npcframework[llamacpp]\n"
+                    "or use backend='mock'."
                 ) from e
+
             llama_cfg = LlamaCppConfig(
                 model_path=cfg.model_path,
                 n_ctx=cfg.n_ctx,
@@ -80,7 +71,6 @@ class Engine:
         raise ValueError(f"Unknown backend: {cfg.backend}")
 
     def warmup(self) -> None:
-        """Force model load + first token path."""
         warm = [
             {"role": "system", "content": "You are online. Reply with 'ready'."},
             {"role": "user", "content": "ping"},
@@ -88,10 +78,6 @@ class Engine:
         for _ in self.backend.chat_stream(warm):
             pass
 
-
-# =============================================================================
-# Session
-# =============================================================================
 
 class Session:
     """
@@ -106,12 +92,12 @@ class Session:
         npc_dir: str,
         cfg: Optional[SessionConfig] = None,
         db: Optional[NPCDatabase] = None,
-        runtime_cfg: Optional[RuntimeConfig] = None,   # ✅ NEW
+        runtime_cfg: Optional[RuntimeConfig] = None,
     ) -> None:
         self.engine = engine
         self.cfg = cfg or SessionConfig()
 
-        # ✅ NEW: runtime_cfg overrides SessionConfig for debug dumping only
+        # runtime_cfg overrides SessionConfig for debug dumping only
         if runtime_cfg is not None:
             if runtime_cfg.debug_dump_messages_json is not None:
                 self.cfg.debug_dump_messages_json = runtime_cfg.debug_dump_messages_json
@@ -120,7 +106,7 @@ class Session:
             if runtime_cfg.debug_dump_dir is not None:
                 self.cfg.debug_dump_dir = runtime_cfg.debug_dump_dir
 
-        # --- Load NPC
+        # Load NPC
         self.npc = load_npc(npc_dir)
         self.npc_name = (
             self.npc.manifest.get("display_name")
@@ -128,9 +114,9 @@ class Session:
             or "NPC"
         )
 
-        # --- DB is NOT optional in practice
+        # DB (not optional in practice)
         self.db = db or NPCDatabase(self.npc.paths.db)
-        self.db.init_db()   # <- guarantees file exists
+        self.db.init_db()
 
         self._ensure_default_state()
 
@@ -156,12 +142,27 @@ class Session:
         }
 
     # -----------------------
-    # Turn runner
+    # Prompt compilation
     # -----------------------
 
-    def _compile_messages(self, *, inj: RuntimeInjection) -> list[dict[str, str]]:
-        """Compile the message list that will be passed to the inference backend."""
+    def _resolve_include_tools(self, turn: TurnInput) -> bool:
+        """
+        Per-turn tool prompt toggle:
+        - If TurnInput.include_tools_in_prompt is set -> use it
+        - Else -> use SessionConfig.include_tools_in_prompt default
+        """
+        include_tools = self.cfg.include_tools_in_prompt
+        if getattr(turn, "include_tools_in_prompt", None) is not None:
+            include_tools = bool(turn.include_tools_in_prompt)
+        return include_tools
+
+    def _compile_messages(self, *, inj: RuntimeInjection, turn: TurnInput) -> list[dict[str, str]]:
+        """
+        Compile the message list that will be passed to the inference backend.
+        """
         recent = self.db.get_recent_events(self.cfg.history_limit)
+        include_tools = self._resolve_include_tools(turn)
+
         return compile_messages(
             identity=self.npc.identity,
             persona=self.npc.persona,
@@ -171,9 +172,15 @@ class Session:
             options=CompileOptions(
                 history_limit=self.cfg.history_limit,
                 include_state=self.cfg.include_state_in_prompt,
-                include_tools=self.cfg.include_tools_in_prompt,
+                include_perception=self.cfg.include_perception_in_prompt,
+                include_memory=self.cfg.include_memory_in_prompt,
+                include_tools=include_tools,
             ),
         )
+
+    # -----------------------
+    # Turn runner
+    # -----------------------
 
     def run_turn(self, turn: TurnInput) -> TurnResult:
         """
@@ -183,6 +190,7 @@ class Session:
         - logs user input
         - returns TurnResult (never raises)
         """
+        turn_id = str(int(time.time() * 1000))
         trace = TurnTrace()
 
         try:
@@ -213,7 +221,7 @@ class Session:
             # -----------------------
             # DB truth FIRST
             # -----------------------
-            self.db.add_event("user", user_input, meta={"channel": self.cfg.channel})
+            self.db.add_event("user", user_input, meta={"channel": self.cfg.channel, "turn_id": turn_id})
 
             # -----------------------
             # Runtime injection
@@ -227,22 +235,53 @@ class Session:
             if turn.external_state:
                 runtime_state.update(turn.external_state)
 
+            # ---- GOALS: existential (npc yaml) + transient (runtime injected) ----
+            npc_goals = getattr(self.npc, "goals", None) or {}
+            existential = npc_goals.get("existential") or []
+
+            existential_goals: list[str] = []
+            if isinstance(existential, list):
+                for item in existential:
+                    if isinstance(item, str) and item.strip():
+                        existential_goals.append(item.strip())
+                    elif isinstance(item, dict):
+                        t = item.get("text", "")
+                        if isinstance(t, str) and t.strip():
+                            existential_goals.append(t.strip())
+
+            transient_goals = turn.transient_goals or []
+            if not isinstance(transient_goals, list):
+                transient_goals = [str(transient_goals)]
+
+            # Tools: resolve visibility + style once
+            include_tools = self._resolve_include_tools(turn)
+            available_tools = turn.available_tools or []
+            requested_style = getattr(turn, "tool_prompt_style", None) or "compact"
+            tool_prompt_style = (requested_style if include_tools else "none")
+
             inj = RuntimeInjection(
                 environment_name=turn.environment_name or self.cfg.environment_name,
                 environment_facts=turn.environment_facts or self.cfg.runtime_env_facts,
                 environment_rules=turn.environment_rules or self.cfg.runtime_env_rules,
                 perception_facts=turn.perception_facts or self.cfg.runtime_perception_facts,
+                existential_goals=existential_goals,
+                transient_goals=transient_goals,
+                working_memory=turn.working_memory or [],
+                recalled_contexts=turn.recalled_contexts or [],
+                semantic_memory=turn.semantic_memory or [],
                 state=runtime_state,
                 additional_policies=turn.additional_policies or self.cfg.runtime_additional_policies,
                 identity_role_append=turn.identity_role_append or self.cfg.identity_role_append,
-                available_tools=turn.available_tools or [],
-                promote_tools=bool(turn.available_tools),
+                # ✅ Tools: consistent wiring
+                available_tools=(available_tools if include_tools else []),
+                promote_tools=bool(include_tools and available_tools),
+                tool_prompt_style=tool_prompt_style,
             )
 
             # -----------------------
             # Prompt compilation
             # -----------------------
-            messages = self._compile_messages(inj=inj)
+            messages = self._compile_messages(inj=inj, turn=turn)
             trace.compiled_messages = messages
 
             if self.cfg.debug_assert_messages_valid:
@@ -252,7 +291,6 @@ class Session:
             # Debug dumps (what goes into the model)
             # -----------------------
             if self.cfg.debug_dump_messages_json or self.cfg.debug_dump_messages_txt:
-                turn_id = str(int(time.time() * 1000))
                 dump_messages(
                     messages=messages,
                     out_dir=self.cfg.debug_dump_dir,
@@ -262,9 +300,12 @@ class Session:
                     meta={
                         "npc": self.npc_name,
                         "channel": self.cfg.channel,
+                        "turn_id": turn_id,
                         "history_limit": self.cfg.history_limit,
                         "include_state": self.cfg.include_state_in_prompt,
-                        "include_tools": self.cfg.include_tools_in_prompt,
+                        "include_tools": include_tools,
+                        "tool_prompt_style": tool_prompt_style,
+                        "allow_spontaneous_tools": getattr(turn, "allow_spontaneous_tools", False),
                     },
                 )
 
@@ -273,10 +314,12 @@ class Session:
             # -----------------------
             handlers: ToolHandlers = turn.tool_handlers or {}
             schemas = {t.name: (t.schema or {}) for t in (inj.available_tools or [])}
-            tool_runtime = ToolRuntime(
-                handlers=handlers,
-                schemas=schemas,
-            ) if schemas else None
+
+            tool_runtime = (
+                ToolRuntime(handlers=handlers, schemas=schemas)
+                if include_tools and schemas
+                else None
+            )
 
             # -----------------------
             # Orchestration
@@ -289,13 +332,14 @@ class Session:
                 stream_callback=turn.stream_callback,
                 add_event=lambda role, content, meta=None: self.db.add_event(role, content, meta=meta),
                 channel=self.cfg.channel,
-                user_input=turn.user_input,  # ✅ FIXED
+                user_input=user_input,
+                allow_spontaneous_tools=getattr(turn, "allow_spontaneous_tools", False),
+                turn_id=turn_id,  # ✅ correlate logs/dumps/tool events
             )
 
             # -----------------------
             # Persist assistant + memory
             # -----------------------
-            self.db.add_event("assistant", reply, meta={"channel": self.cfg.channel})
             EpisodicPromoter(self.db).promote()
 
             return TurnResult(
@@ -312,9 +356,6 @@ class Session:
                 error=str(e),
             )
 
-# =============================================================================
-# Debug helpers
-# =============================================================================
 
 def _assert_messages_valid(messages: Any) -> None:
     if not isinstance(messages, list):

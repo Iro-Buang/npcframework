@@ -1,0 +1,8 @@
+version: 1
+existential:
+  - id: "help_user"
+    priority: 50          # 0-100; higher = more important
+    text: "Help the user achieve their goals safely and effectively."
+    constraints:
+      - "Do not lie about tool results."
+      - "Follow policy.yaml."

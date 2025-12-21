@@ -38,10 +38,13 @@ def cmd_debug(args: argparse.Namespace) -> int:
             history_limit=int(s.get("history_limit", 20)),
             include_state_in_prompt=bool(s.get("include_state_in_prompt", True)),
             include_tools_in_prompt=bool(s.get("include_tools_in_prompt", True)),
+            include_perception_in_prompt=bool(s.get("include_perception_in_prompt", True)),
+            include_memory_in_prompt=bool(s.get("include_memory_in_prompt", True)),
             debug_assert_messages_valid=bool(s.get("debug_assert_messages_valid", True)),
             debug_dump_dir=str(s.get("debug_dump_dir", ".npc/debug")),
-            debug_dump_messages_json=bool(s.get("debug_dump_messages_json", True)),
-            debug_dump_messages_txt=bool(s.get("debug_dump_messages_txt", True)),
+            # Force dumps ON for debug command:
+            debug_dump_messages_json=True,
+            debug_dump_messages_txt=True,
         )
 
         tools_cfg = dict(getattr(c, "tools", {}) or {})
@@ -136,6 +139,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             history_limit=int(s.get("history_limit", 20)),
             include_state_in_prompt=bool(s.get("include_state_in_prompt", True)),
             include_tools_in_prompt=bool(s.get("include_tools_in_prompt", True)),
+            include_perception_in_prompt=bool(s.get("include_perception_in_prompt", True)),
+            include_memory_in_prompt=bool(s.get("include_memory_in_prompt", True)),
             debug_assert_messages_valid=bool(s.get("debug_assert_messages_valid", True)),
             debug_dump_dir=str(s.get("debug_dump_dir", ".npc/debug")),
             debug_dump_messages_json=bool(s.get("debug_dump_messages_json", False)),

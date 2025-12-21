@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -13,17 +13,23 @@ authors = [{ name = "Iro Buang" }]
 
 dependencies = [
   "pyyaml>=6.0",
+  "tomli>=2.0.1; python_version<'3.11'",
 ]
 
 [project.scripts]
 npcframework = "npcframework.cli:main"
 
-[tool.setuptools]
-packages = ["npcframework", "npcframework.core", "npcframework.inference"]
-
-
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+dev = [
+  "pytest>=8.0",
+]
+
+llamacpp = [
+  "llama-cpp-python>=0.2.90",
+]
+
+[tool.setuptools]
+packages = { find = { include = ["npcframework*"] } }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

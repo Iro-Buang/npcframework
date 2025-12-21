@@ -35,12 +35,13 @@ DEFAULT_STRICT = True
 ALLOWED_VERBOSITY = {"low", "medium", "high"}
 
 # --- Spec required files (SPEC.md v0.1)
-SPEC_REQUIRED_FILES = ("npc.yaml", "identity.yaml", "persona.yaml", "policy.yaml")
+SPEC_REQUIRED_FILES = ("npc.yaml", "identity.yaml", "persona.yaml", "policy.yaml", "goals.yaml")
+
 SPEC_OPTIONAL_FILES = ("memory.yaml", "tools.yaml", "kernel.yaml", "actions.yaml", "state.yaml", "perception.yaml", "npc.db")
 
 # --- Legacy manifest schema keys (your older format)
 LEGACY_REQUIRED_MANIFEST_KEYS = {"npc_version", "id", "display_name", "files", "data"}
-LEGACY_REQUIRED_FILES_KEYS = {"identity", "persona", "policy", "memory", "kernel", "actions", "tools"}
+LEGACY_REQUIRED_FILES_KEYS = {"identity","persona","policy","goals","memory","kernel","actions","tools"}
 LEGACY_REQUIRED_DATA_KEYS = {"db"}
 
 # Allowed keys per document (STRICT MODE)
@@ -52,6 +53,8 @@ ALLOWED_KEYS: Dict[str, set[str]] = {
     "identity.yaml": {"archetype", "description", "core_values", "purpose", "boundaries", "canon", "speech_rules", META_KEY},
     "persona.yaml": {"tone", "style", "verbosity", "humor", "speech_rules", "taboos", "example_lines", "do", "dont", META_KEY},
     "policy.yaml": {"rules", "tool_rules", "boundaries", "refusal_policy", "truthfulness", "refusal_style", META_KEY},
+    "goals.yaml": {"version", "existential", "meta"},
+
 
     "memory.yaml": {"seeds", "preferences", "relationships", "facts", "policy", "stores", META_KEY},
     "tools.yaml": {"tools", "enabled", "registry", META_KEY},
@@ -258,6 +261,41 @@ def _validate_spec_style(report: ValidationReport, npc_path: Path, *, strict: bo
     identity = _ensure_yaml(report, npc_path / "identity.yaml", strict=strict)
     persona = _ensure_yaml(report, npc_path / "persona.yaml", strict=strict)
     policy = _ensure_yaml(report, npc_path / "policy.yaml", strict=strict)
+
+    goals = _ensure_yaml(report, npc_path / "goals.yaml", strict=strict)
+
+    if goals:
+        # version optional, but if present must be int
+        if "version" in goals and goals["version"] is not None and not isinstance(goals["version"], int):
+            report.add("GOALS_TYPE", "version must be an integer.", _keypath("goals.yaml", "version"))
+
+        ex = goals.get("existential")
+        if ex is None:
+            report.add("GOALS_MISSING", "Missing 'existential' list.", _keypath("goals.yaml", "existential"))
+        elif not isinstance(ex, list):
+            report.add("GOALS_TYPE", "existential must be a list.", _keypath("goals.yaml", "existential"))
+        else:
+            for i, item in enumerate(ex):
+                if isinstance(item, str):
+                    if not item.strip():
+                        report.add("GOALS_TYPE", "existential items must not be empty strings.",
+                                   _keypath("goals.yaml", "existential"))
+                elif isinstance(item, dict):
+                    text = item.get("text")
+                    if not isinstance(text, str) or not text.strip():
+                        report.add("GOALS_TYPE", "existential goal objects must include non-empty 'text'.",
+                                   _keypath("goals.yaml", "existential"))
+                    pr = item.get("priority", None)
+                    if pr is not None and not isinstance(pr, (int, float)):
+                        report.add("GOALS_TYPE", "priority must be a number if provided.",
+                                   _keypath("goals.yaml", "existential"))
+                    gid = item.get("id", None)
+                    if gid is not None and (not isinstance(gid, str) or not gid.strip()):
+                        report.add("GOALS_TYPE", "id must be a non-empty string if provided.",
+                                   _keypath("goals.yaml", "existential"))
+                else:
+                    report.add("GOALS_TYPE", "existential items must be either string or object.",
+                               _keypath("goals.yaml", "existential"))
 
     if identity:
         if not isinstance(identity.get("archetype"), str):

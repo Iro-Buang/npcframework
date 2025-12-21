@@ -6,6 +6,7 @@ files:
   identity: identity.yaml
   persona: persona.yaml
   policy: policy.yaml
+  goals: goals.yaml
   memory: memory.yaml
   kernel: kernel.yaml
   actions: actions.yaml
