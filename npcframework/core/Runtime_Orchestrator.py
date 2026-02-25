@@ -5,20 +5,27 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .Runtime_Config import load_config_yaml, get_str
+
 Message = Dict[str, str]
 ToolHandler = Callable[[Dict[str, Any]], Any]
 ToolValidator = Callable[[str, Dict[str, Any]], Tuple[bool, Optional[str], Optional[Dict[str, Any]]]]
 
-TOOL_CALL_PREFIX = "/tool_call"
-TOOL_RESULT_PREFIX = "/tool_result"
+cfg = load_config_yaml("runtime_orchestrator")
 
-FINALIZE_SYSTEM_PROMPT = (
-    "Tool execution is complete. Now answer the user's request.\n"
-    "Rules:\n"
-    "- Do NOT output /tool_call\n"
-    "- Do NOT output JSON\n"
-    "- Do NOT explain your reasoning\n"
-    "- Output ONLY the final answer requested by the user\n"
+TOOL_CALL_PREFIX = get_str(cfg, "tool_call_prefix", "/tool_call", filename="runtime_orchestrator")
+TOOL_RESULT_PREFIX = get_str(cfg, "tool_result_prefix", "/tool_result", filename="runtime_orchestrator")
+
+FINALIZE_SYSTEM_PROMPT = get_str(
+    cfg,
+    "finalize_system_prompt",
+    """Tool execution is complete. Now answer the user's request.
+Rules:
+- Do NOT output /tool_call
+- Do NOT output JSON
+- Do NOT explain your reasoning
+- Output ONLY the final answer requested by the user
+""",
 )
 
 @dataclass
@@ -63,10 +70,14 @@ def parse_tool_call(text: str, *, relaxed: bool = False) -> Optional[Tuple[str, 
     if not payload:
         raise ValueError("tool_call missing payload")
 
+    cfg_aliases = load_config_yaml("runtime_orchestrator").get("tool_aliases") or {}
+    if not isinstance(cfg_aliases, dict):
+        cfg_aliases = {}
     TOOL_ALIASES = {
         "get_time": "time_now",
         "time": "time_now",
         "now": "time_now",
+        **{str(k): str(v) for k, v in cfg_aliases.items()},
     }
 
     def _apply_alias(name: str) -> str:
@@ -133,12 +144,25 @@ def _try_autorun_tool_from_user_input(user_input: str, tool_runtime: Optional[To
 
     u = (user_input or "").lower().strip()
 
+    autorun_cfg = load_config_yaml("runtime_orchestrator").get("autorun") or {}
+    if not isinstance(autorun_cfg, dict):
+        autorun_cfg = {}
+
+    def _has_any_keyword(tool: str) -> bool:
+        rule = autorun_cfg.get(tool) or {}
+        if not isinstance(rule, dict):
+            return False
+        kws = rule.get("keywords") or []
+        if not isinstance(kws, list):
+            return False
+        return any(str(k).lower() in u for k in kws if str(k).strip())
+
     # If the user asked for time, and time_now exists
-    if "time" in u and "time_now" in tool_runtime.handlers:
+    if "time_now" in tool_runtime.handlers and _has_any_keyword("time_now"):
         return ("time_now", {})
 
     # If the user asked to add and 'add' tool exists, try parse "A + B"
-    if "add" in u and "add" in tool_runtime.handlers:
+    if "add" in tool_runtime.handlers and _has_any_keyword("add"):
         import re
         m = re.search(r"(-?\d+)\s*\+\s*(-?\d+)", u)
         if m:
@@ -151,9 +175,19 @@ def _try_autorun_tool_from_user_input(user_input: str, tool_runtime: Optional[To
 
 def _user_demands_tool(user_input: str) -> bool:
     u = (user_input or "").lower()
-    triggers = [
-        "use a tool", "use tool", "call a tool", "tool call", "use your tool", "use the tool",
-    ]
+    cfg_triggers = load_config_yaml("runtime_orchestrator").get("user_demands_tool_triggers") or []
+    if not isinstance(cfg_triggers, list):
+        cfg_triggers = []
+    triggers = [str(t).lower() for t in cfg_triggers if str(t).strip()]
+    if not triggers:
+        triggers = [
+            "use a tool",
+            "use tool",
+            "call a tool",
+            "tool call",
+            "use your tool",
+            "use the tool",
+        ]
     return any(t in u for t in triggers)
 
 

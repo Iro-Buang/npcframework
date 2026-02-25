@@ -1,0 +1,20 @@
+Memory Stuff V2:
+		- Fields needed
+			- npc_instance_id
+			- Session_id (this refers to the session of this episode was recorded in.
+			- channel_name (this refers to the channel of which the NPC interacted in (e.g. Slack, Discord, Skyrim, Voice, etc.))
+			- system_id (this refers to the unique id of the specific system of NPC when interacting (e.g. Voice as 'Call Center Kevin'). Good way to put it is that one 'simulation' system = one uniquely generated id)
+			- environment_id (this refers to the unique id for the environment the NPC currently is in. )
+
+	- Episodic Memory Promoter
+		- Should be handled in app... should be replicated to the NPC's file
+
+
+	- Semantic Memory Promoter
+		- Similar to Episodic Memory Promoter, should be handled in app...
+		- will need to standardize relationships, beliefs, opinions, etc.
+		- will this be a different table?
+
+	- Both may need standardized 'Reflection' script as part of core of which the app level can call it as a function like reflect_semantic() or reflect_episodic () of which the NPC will add memories based on how it understand, this removes the need for the developer's side to rewrite the function from scratch.
+
+	- All must be tabular format with no need to explore NoSQL or VectorDB approach.

@@ -1,0 +1,38 @@
+LICENSE
+README.md
+pyproject.toml
+npcframework/__init__.py
+npcframework/api.py
+npcframework/cli.py
+npcframework/config.py
+npcframework/debug_dump.py
+npcframework/main.py
+npcframework/npcframework_types.py
+npcframework.egg-info/PKG-INFO
+npcframework.egg-info/SOURCES.txt
+npcframework.egg-info/dependency_links.txt
+npcframework.egg-info/entry_points.txt
+npcframework.egg-info/requires.txt
+npcframework.egg-info/top_level.txt
+npcframework/core/NPC_DB_Episodic_Promoter.py
+npcframework/core/NPC_DB_Manager.py
+npcframework/core/NPC_Loader.py
+npcframework/core/NPC_Validator.py
+npcframework/core/Runtime_Commands.py
+npcframework/core/Runtime_Inference_LlamaCPP.py
+npcframework/core/Runtime_Inference_Mock.py
+npcframework/core/Runtime_Orchestrator.py
+npcframework/core/Runtime_Prompt_Compiler.py
+npcframework/core/module testers/NPCLoader_Tester.py
+npcframework/core/module testers/NPCPrompt_Compiler_Tester.py
+npcframework/core/module testers/Runtime_Tools_Warmup_Tester.py
+npcframework/core/module testers/db_tester.py
+npcframework/inference/__init__.py
+npcframework/inference/llamacpp.py
+npcframework/inference/mock.py
+npcframework/tools/__init__.py
+npcframework/tools/builtin.py
+tests/test_db_writes.py
+tests/test_tool_call.py
+tests/test_turn.py
+tests/test_validate_npcs.py

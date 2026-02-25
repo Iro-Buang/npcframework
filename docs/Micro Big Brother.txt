@@ -1,0 +1,37 @@
+Micro Big Brother
+
+Objects/Class:
+
+	NPC:
+		The NPCLoader's data from NPCFramework (Basically Load shit from the object using npcframework
+		In-world parameters (Status, state, location, top n episodic memories, top n semantic memories, etc. etc.)
+
+	Engine/NPCFramework Runtime:
+		NPCFramework's engine manifested in app?
+		Basically the compiler to be sent to the framework?
+		Session/Runtime based
+		Abstracts compilers
+
+	House/Stage
+		Houses variables
+		
+
+	DB.py
+		Manages Data I/O
+
+	Memories.py
+		Manages Memories
+		Works with DB but db.py is more on configuration, this on memory management
+		Sends data to respective databases and tables
+
+	EventLogger.py
+		Logs events
+		Tracks changes and updates
+
+	ToolManager.py
+		Manages tools
+		Curates tools
+		Basically NPC Entity class have access to whichever tools they have permission on.
+		Explicitly assigned to each NPC
+		When NPC calls the tool, data gets parsed, inputs get validated, relevant/valid shit gets sent to the backend/system for processing (change values, state, upload to database, recall more memories, etc.)
+		

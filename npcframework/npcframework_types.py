@@ -60,6 +60,14 @@ class EngineConfig:
 
     stop: Optional[List[str]] = None
 
+    # vLLM (OpenAI-compatible server mode)
+    vllm_mode: str = "server"
+    vllm_base_url: str = "http://127.0.0.1:8000/v1"
+    vllm_model: str = ""
+    vllm_api_key: str = ""
+    vllm_timeout_s: float = 60.0
+    vllm_stream: bool = False
+
 
 @dataclass
 class SessionConfig:
@@ -71,6 +79,15 @@ class SessionConfig:
     channel: str = "cli"
     environment_id: str = "local"
     environment_name: str = "local"
+
+    # events/history scoping
+    # If True, history retrieval ignores that dimension.
+    run_across_sessions: bool = False
+    run_across_environments: bool = False
+    run_across_channels: bool = False
+
+    # Optional explicit session id (advanced). If provided, this session_id will be used/created.
+    session_id: Optional[str] = None
 
     # prompt/history
     history_limit: int = 20

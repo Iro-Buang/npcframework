@@ -66,11 +66,20 @@ class NPCDatabase:
         npc_id: str = "npc",
         default_channel: str = "cli",
         default_environment_id: Optional[str] = None,
+        *,
+        run_across_sessions: bool = False,
+        run_across_environments: bool = False,
+        run_across_channels: bool = False,
+        session_id: Optional[str] = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.npc_id = npc_id
         self.default_channel = default_channel
         self.default_environment_id = default_environment_id
+        self.run_across_sessions = bool(run_across_sessions)
+        self.run_across_environments = bool(run_across_environments)
+        self.run_across_channels = bool(run_across_channels)
+        self._session_id_override = session_id
 
     # -------------------------
     # Connection / Setup
@@ -142,6 +151,25 @@ class NPCDatabase:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_events_parent ON events(parent_event_id);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_events_env_ts ON events(environment_id, ts);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_events_channel_ts ON events(channel, ts);")
+
+            # ---- ensure session exists when using explicit session_id override
+            # Without this, inserting into events will fail FK(events.session_id -> sessions.session_id).
+            if self._session_id_override:
+                sid = str(self._session_id_override)
+                cur.execute(
+                    """
+                    INSERT OR IGNORE INTO sessions (session_id, started_at, channel, environment_id, meta_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sid,
+                        _now_iso(),
+                        str(self.default_channel or 'cli'),
+                        str(self.default_environment_id or 'local'),
+                        "{}",
+                    ),
+                )
+                conn.commit()
 
             # ---- state kv (keep)
             cur.execute("""
@@ -404,8 +432,24 @@ class NPCDatabase:
         error_text = str(error_text) if error_text else None
 
         with self.connect() as conn:
-            session_id = self._get_or_create_current_session(conn)
+            # Session scoping:
+            # - If a session_id override was provided at DB construction, always use it.
+            # - Else fallback to the DB's current/resumable session.
+            session_id = self._session_id_override or self._get_or_create_current_session(conn)
             cur = conn.cursor()
+
+            # Ensure the chosen session_id exists in sessions table (FK safety)
+            # This is crucial when session_id is provided as an override.
+            cur.execute(
+                "INSERT OR IGNORE INTO sessions (session_id, started_at, channel, environment_id, meta_json) VALUES (?, ?, ?, ?, ?)",
+                (
+                    str(session_id),
+                    _now_iso(),
+                    str(channel or self.default_channel or 'cli'),
+                    str(environment_id or self.default_environment_id or 'local'),
+                    "{}",
+                ),
+            )
 
             # load existing current correlation id if any
             cur.execute("SELECT value_json FROM state_kv WHERE key = ?", ("current_correlation_id",))
@@ -470,15 +514,78 @@ class NPCDatabase:
             conn.commit()
             return int(cur.lastrowid)
 
-    def get_recent_events(self, limit: int = 20) -> List[Event]:
+    def get_recent_events(
+        self,
+        limit: int = 20,
+        *,
+        session_id: Optional[str] = None,
+        channel: Optional[str] = None,
+        environment_id: Optional[str] = None,
+        run_across_sessions: Optional[bool] = None,
+        run_across_channels: Optional[bool] = None,
+        run_across_environments: Optional[bool] = None,
+    ) -> List[Event]:
+        """
+        Fetch recent events, with optional scoping.
+
+        Scoping rules:
+        - If run_across_* is True, that dimension is NOT filtered.
+        - If run_across_* is False, the dimension is filtered using the provided value,
+          or the DB defaults (current session / default channel / default environment).
+        """
+        # Resolve scope toggles (per-call overrides fall back to constructor defaults)
+        across_sessions = self.run_across_sessions if run_across_sessions is None else bool(run_across_sessions)
+        across_channels = self.run_across_channels if run_across_channels is None else bool(run_across_channels)
+        across_envs = self.run_across_environments if run_across_environments is None else bool(run_across_environments)
+
         with self.connect() as conn:
             cur = conn.cursor()
+
+            # Determine current session id if needed
+            effective_session_id: Optional[str] = None
+            if not across_sessions:
+                if session_id:
+                    effective_session_id = str(session_id)
+                else:
+                    effective_session_id = self._get_or_create_current_session(conn)
+
+            effective_channel: Optional[str] = None
+            if not across_channels:
+                effective_channel = str(channel or self.default_channel or "cli")
+
+            effective_env_id: Optional[str] = None
+            if not across_envs:
+                if environment_id is not None:
+                    effective_env_id = str(environment_id)
+                else:
+                    effective_env_id = str(self.default_environment_id) if self.default_environment_id is not None else None
+
+            where = []
+            params: List[Any] = []
+
+            if effective_session_id is not None:
+                where.append("session_id = ?")
+                params.append(effective_session_id)
+            if effective_channel is not None:
+                where.append("channel = ?")
+                params.append(effective_channel)
+            if not across_envs:
+                # environment_id can legitimately be NULL; treat None as "only NULL" if default is None
+                if effective_env_id is None:
+                    where.append("environment_id IS NULL")
+                else:
+                    where.append("environment_id = ?")
+                    params.append(effective_env_id)
+
+            where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
             cur.execute(
-                """SELECT event_seq, ts, actor_type, content, payload_json
-                   FROM events
-                   ORDER BY event_seq DESC
-                   LIMIT ?""",
-                (limit,),
+                f"""SELECT event_seq, ts, actor_type, content, payload_json
+                    FROM events
+                    {where_sql}
+                    ORDER BY event_seq DESC
+                    LIMIT ?""",
+                tuple(params + [limit]),
             )
             rows = cur.fetchall()
 
@@ -489,8 +596,9 @@ class NPCDatabase:
             role = payload.get("role")
             if not role:
                 at = str(r["actor_type"])
-                role = "assistant" if at == "npc" else at
+                role = at if at in ("user", "assistant", "system") else "user"
 
+            # Keep legacy Event signature
             events.append(
                 Event(
                     id=int(r["event_seq"]),
@@ -500,6 +608,7 @@ class NPCDatabase:
                     meta=payload,
                 )
             )
+
         return events
 
     def wipe_events(self) -> None:

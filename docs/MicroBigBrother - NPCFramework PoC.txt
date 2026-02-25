@@ -1,0 +1,102 @@
+MicroBigBrother - NPCFramework Proof of Concept
+
+Database Setup
+location: MicroBB/data
+Tables:
+	- events
+		- session_id
+		- turn_id
+		- event_id
+		- ts_unix
+		- actor
+		- content
+		- event_type
+
+	- perceived_events
+		- perceived_id
+		- turn_id
+		- npc_id
+		- event_id
+		- perceived_content
+
+	- episodes
+		- episode_id
+		- turn_id
+		- session_id
+		- npc_id
+		- content
+
+	- semantic_memory
+		- mem_id
+		- session_id
+		- npc_id
+		- turn_id
+		
+		- scope
+		- subject
+		- content
+
+	- state_deltas
+		- delta_id
+		- session_id
+		- turn_id
+		
+		- scope
+		- owner_id
+		- key
+		- op
+		- value
+
+
+Tool Calling and Registry setup
+	- Every turn, an NPC can do exactly one of the following:
+
+	- Shared Actions (actions everyone can do in the simulation)
+
+		- move_to(room_name)
+			- options are provided based on current room. Unavailable choices will not be exposed to the prompt and calling it will return as invalid
+
+		- talk()
+			- Options are provided based on who's in the current room along with the NPC
+			- Expires after a turn when NPC ignores the request and will be logged as an episode
+
+		- accept_talk()/reject_talk
+			- Options are provided if another character requested to talk
+			- If both parties agree to talk, a "talking session" will take place.
+			- Each NPC will only be able to say 4 lines in a given session
+			- If an NPC rejects the request, it will be flagged as part of an episode (e.g. Anna did not want to talk to Kevin)
+			- If both talked at the end of the session, the NPCs will be prompted on their interpretation of the following session ("Summarize what did you talk about and what do you think of your conversation.")
+			- NPC's response to the prompt will be appended to the episode 
+
+		- skip_turn()
+			- NPC skips a turn for this episode
+			- NPC did not change position/etc.
+			- Logged episode as "X relaxed in the y room."
+	
+	- Kevin Exclusive Actions
+			
+			- request_anna() #cook/clean/more
+				- Reduces Kevin's request count
+				- Logged on Episode
+				- Only the choices available in the room gets promoted as an option
+				- Kevin can repeatedly request Anna the same action if Anna rejects.
+
+		Anna Exclusive Actions
+			- clean_living_room() #only available in the living room
+			- cook() #egg, bacon, hotdog #only available in kitchen
+			- accept_request()/reject_request
+				- If Anna accepts, the task gets removed from the next options and automatically moves to the next room
+				- Logged outcome
+				- Anna can only reject up to 7 times
+				- If Anna accepts the task she gets an additional guess
+			- Each task gets logged on an episode
+			- make_guess()
+				- Requires human validation when Anna does guess for now
+				- Outcome gets logged in as an episode for Anna and Kevin.
+
+
+Reflection Mechanics
+	- Every 5 turns, each NPC will be prompted to reflect on 3 questions.
+	- Reflections are promoted into semantic memory tables
+	- Prompted as "What is the most interesting new findings given this above information?" "What are the new insights you gained?" "What information are there that can help you achieve your goals?"
+	

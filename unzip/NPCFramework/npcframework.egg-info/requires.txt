@@ -1,0 +1,10 @@
+pyyaml>=6.0
+
+[:python_version < "3.11"]
+tomli>=2.0.1
+
+[dev]
+pytest>=8.0
+
+[llamacpp]
+llama-cpp-python>=0.2.90

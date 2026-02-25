@@ -1,0 +1,43 @@
+# Runtime inference defaults (legacy Runtime_Inference_LlamaCPP path)
+#
+# The library-first API flow uses configs/inference.yaml + SessionConfig.
+# This file exists so the legacy CLI/runtime_inference path can avoid
+# hardcoded defaults in Python.
+
+channel: "cli"
+environment_id: "local_cli"
+environment_name: "local_cli"
+
+default_history_limit: 20
+compile_history_limit: 20
+
+include_state_in_prompt: true
+include_tools_in_prompt: true
+
+debug_print_messages: true
+debug_assert_messages_valid: true
+
+model:
+  model_path: ""          # app should set (or inference.yaml should be used instead)
+  n_ctx: 8192
+  max_tokens: 256
+  temperature: 0.7
+  top_p: 0.9
+  n_gpu_layers: 0
+
+state_defaults:
+  mode: "idle"
+  mood: "neutral"
+  energy: 0.8
+
+runtime:
+  goal: "help the user"
+  mode: "conversational"
+  perception_facts: []
+  env_facts: []
+  env_rules: []
+  additional_policies: []
+  identity_role_append: ""
+
+tools:
+  promote_keywords: []   # legacy heuristic fallback

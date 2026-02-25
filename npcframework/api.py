@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional, Dict
 import time
 
@@ -42,6 +43,18 @@ class Engine:
         self.cfg = cfg
         self.backend: InferenceEngine = self._build_backend(cfg)
 
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "Engine":
+        """Create an Engine from a canonical YAML config (single source of truth)."""
+        from npcframework.inference.factory import engine_config_from_yaml
+        cfg = engine_config_from_yaml(path)
+        return cls(cfg)
+
+    @classmethod
+    def from_config_dir(cls, config_dir: str | Path, filename: str = "inference.yaml") -> "Engine":
+        p = Path(config_dir) / filename
+        return cls.from_yaml(p)
+
     def _build_backend(self, cfg: EngineConfig) -> InferenceEngine:
         if cfg.backend == "llamacpp":
             try:
@@ -65,6 +78,21 @@ class Engine:
             )
             return LlamaCppEngine(llama_cfg)
 
+        if cfg.backend == "vllm":
+            from .inference.vllm import VLLMEngine, VLLMConfig
+
+            vcfg = VLLMConfig(
+                base_url=cfg.vllm_base_url,
+                model=cfg.vllm_model,
+                api_key=cfg.vllm_api_key,
+                temperature=cfg.temperature,
+                top_p=cfg.top_p,
+                max_tokens=cfg.max_tokens,
+                timeout_s=cfg.vllm_timeout_s,
+                stream=cfg.vllm_stream,
+            )
+            return VLLMEngine(vcfg)
+
         if cfg.backend == "mock":
             return MockEngine()
 
@@ -77,6 +105,7 @@ class Engine:
         ]
         for _ in self.backend.chat_stream(warm):
             pass
+
 
 
 class Session:
@@ -93,9 +122,39 @@ class Session:
         cfg: Optional[SessionConfig] = None,
         db: Optional[NPCDatabase] = None,
         runtime_cfg: Optional[RuntimeConfig] = None,
+
+        # --- event DB scoping knobs (config-first, but overridable here) ---
+        channel: Optional[str] = None,
+        environment_id: Optional[str] = None,
+        environment_name: Optional[str] = None,
+        session_id: Optional[str] = None,
+        run_across_sessions: Optional[bool] = None,
+        run_across_channels: Optional[bool] = None,
+        run_across_environments: Optional[bool] = None,
     ) -> None:
         self.engine = engine
         self.cfg = cfg or SessionConfig()
+        # Apply explicit overrides (if provided)
+        if channel is not None:
+            self.cfg.channel = str(channel)
+        if environment_id is not None:
+            self.cfg.environment_id = str(environment_id)
+        if environment_name is not None:
+            self.cfg.environment_name = str(environment_name)
+        if run_across_sessions is not None:
+            self.cfg.run_across_sessions = bool(run_across_sessions)
+        if run_across_channels is not None:
+            self.cfg.run_across_channels = bool(run_across_channels)
+        if run_across_environments is not None:
+            self.cfg.run_across_environments = bool(run_across_environments)
+
+        # Session scoping is the default behavior. If caller did not provide a session_id,
+        # generate a new one per Session instance so history stays isolated by default.
+        if session_id is not None:
+            self.cfg.session_id = str(session_id)
+        elif self.cfg.session_id is None:
+            import uuid as _uuid_mod
+            self.cfg.session_id = f"sess_{_uuid_mod.uuid4().hex}"
 
         # runtime_cfg overrides SessionConfig for debug dumping only
         if runtime_cfg is not None:
@@ -115,7 +174,16 @@ class Session:
         )
 
         # DB (not optional in practice)
-        self.db = db or NPCDatabase(self.npc.paths.db)
+        self.db = db or NPCDatabase(
+            self.npc.paths.db,
+            npc_id=str(self.npc.manifest.get("id") or "npc"),
+            default_channel=self.cfg.channel,
+            default_environment_id=self.cfg.environment_id,
+            run_across_sessions=self.cfg.run_across_sessions,
+            run_across_environments=self.cfg.run_across_environments,
+            run_across_channels=self.cfg.run_across_channels,
+            session_id=self.cfg.session_id,
+        )
         self.db.init_db()
 
         self._ensure_default_state()
@@ -160,7 +228,15 @@ class Session:
         """
         Compile the message list that will be passed to the inference backend.
         """
-        recent = self.db.get_recent_events(self.cfg.history_limit)
+        recent = self.db.get_recent_events(
+            self.cfg.history_limit,
+            session_id=self.cfg.session_id,
+            channel=self.cfg.channel,
+            environment_id=self.cfg.environment_id,
+            run_across_sessions=self.cfg.run_across_sessions,
+            run_across_channels=self.cfg.run_across_channels,
+            run_across_environments=self.cfg.run_across_environments,
+        )
         include_tools = self._resolve_include_tools(turn)
 
         return compile_messages(

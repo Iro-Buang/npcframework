@@ -1,0 +1,33 @@
+# Runtime Orchestrator config (YAML-driven)
+tool_call_prefix: "/tool_call"
+tool_result_prefix: "/tool_result"
+
+finalize_system_prompt: |
+  Tool execution is complete. Now answer the user's request.
+  Rules:
+  - Do NOT output /tool_call
+  - Do NOT output JSON
+  - Do NOT explain your reasoning
+  - Output ONLY the final answer requested by the user
+
+tool_aliases:
+  get_time: "time_now"
+  time: "time_now"
+  now: "time_now"
+
+# If user explicitly demands tool use, we can relax parsing and/or enforce a tool path.
+user_demands_tool_triggers:
+  - "use a tool"
+  - "use tool"
+  - "call a tool"
+  - "tool call"
+  - "use your tool"
+  - "use the tool"
+
+# Minimal deterministic autorun rules (optional; framework fallback only).
+# This is NOT meant to be smart. App-side routing should handle this.
+autorun:
+  time_now:
+    keywords: ["time", "clock"]
+  add:
+    keywords: ["add", "+"]

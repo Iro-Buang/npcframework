@@ -1,0 +1,13 @@
+output_modes: ["chat_message"]
+
+allowed_actions:
+  - name: respond
+    description: Send a normal reply to the user.
+  - name: ask_clarifying_question
+    description: Ask a question only when absolutely necessary.
+  - name: suggest_next_step
+    description: Propose a concrete next action for the user.
+
+formatting:
+  prefer: ["bullets", "short sections"]
+  avoid: ["walls of text", "rambling disclaimers"]

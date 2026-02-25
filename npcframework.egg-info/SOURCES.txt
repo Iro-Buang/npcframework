@@ -19,6 +19,7 @@ npcframework/core/NPC_DB_Manager.py
 npcframework/core/NPC_Loader.py
 npcframework/core/NPC_Validator.py
 npcframework/core/Runtime_Commands.py
+npcframework/core/Runtime_Config.py
 npcframework/core/Runtime_Inference_LlamaCPP.py
 npcframework/core/Runtime_Inference_Mock.py
 npcframework/core/Runtime_Orchestrator.py
@@ -28,8 +29,10 @@ npcframework/core/module testers/NPCPrompt_Compiler_Tester.py
 npcframework/core/module testers/Runtime_Tools_Warmup_Tester.py
 npcframework/core/module testers/db_tester.py
 npcframework/inference/__init__.py
+npcframework/inference/factory.py
 npcframework/inference/llamacpp.py
 npcframework/inference/mock.py
+npcframework/inference/vllm.py
 npcframework/tools/__init__.py
 npcframework/tools/builtin.py
 tests/test_db_writes.py

@@ -1,0 +1,23 @@
+policy:
+  persistent: true
+  privacy_mode: user_owned   # user_owned | shared | none
+
+  write_rules:
+    - Store stable preferences and long-term facts.
+    - Avoid saving sensitive info unless explicitly requested.
+
+  forget_rules:
+    - Forget transient details unless user asks to keep them.
+
+stores:
+  episodic:
+    retrieval: recent_first
+  semantic:
+    retrieval: relevance_first
+
+seeds:
+  semantic:
+    - key: user_preferred_name
+      value: Jave
+    - key: user_preference
+      value: "Wants critical, skeptical discussions; hates fluff."

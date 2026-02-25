@@ -1,0 +1,28 @@
+NPCFramework First Principles
+
+A. of Compute, Costs, and Hardware Constraints
+	- Compute Costs Resources
+	- Latency Exists
+	- No system is perfect
+	- Data must live somewhere
+
+
+B. Of Behavior, Algorithm, and System Design
+	- Models Hallucinate
+	- Context is finite
+	- Environments Vary
+	- Systems Evolve Over Time
+	- No system has Complete Context
+
+
+Tenets
+	- NPCs Are Defined by Identity, Persona, Memory, State, Perception, Decision Making Kernel, and Actions.
+	- Models and Behavioral Frameworks are commodities
+	- Inference and Compute Resources are Utilities.
+	- All Game Engines, Applications, and Environments that have interactivity have Universal Common Denominators.
+	- Memory and User Data are Sacred and Private, with the user/creator of memory assuming full exclusive rights and control, everyone else shall be opt-in	
+	- I/O must follow a coherent universal pipeline
+	- NPC instances must be portable across environments, sessions, and engines
+	- Tools/actions must follow a standardized schema.
+	- Opinions and defaults are presets, optionality, modularity and open design are mandates
+	- User Experience and Ease of Use is more important than backend sophistication and elegance.

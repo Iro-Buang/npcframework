@@ -1,0 +1,15 @@
+# Prompt compiler config (YAML-driven)
+header_line_len: 30
+header_char: "="
+bullet_prefix: "- "
+
+# Keep in sync with runtime_orchestrator.yaml
+tool_call_prefix: "/tool_call"
+tool_call_format: '/tool_call {"name":"<tool_name>","args":{...}}'
+
+max_tool_examples: 3
+
+allowed_event_roles:
+  - user
+  - assistant
+  - system

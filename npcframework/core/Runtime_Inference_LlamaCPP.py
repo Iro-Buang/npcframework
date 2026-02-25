@@ -13,6 +13,8 @@ from npcframework.core.Runtime_Orchestrator import run_with_tools, ToolRuntime
 
 from npcframework.inference.llamacpp import LlamaCppEngine, LlamaCppConfig
 
+from npcframework.core.Runtime_Config import load_config_yaml
+
 
 # =============================================================================
 # CONFIG
@@ -35,7 +37,8 @@ class RuntimeConfig:
     debug_print_messages: bool = True
     debug_assert_messages_valid: bool = True
 
-    model_path: str = "inference/models/gemma-3-4b-it-q4_0.gguf"
+    # Model path must be provided by the app config (repo /configs). No hardcoded defaults.
+    model_path: str = ""
     model_n_ctx: int = 8192
     model_max_tokens: int = 256
     model_temperature: float = 0.7
@@ -58,6 +61,64 @@ class RuntimeConfig:
     tool_promote_keywords: tuple[str, ...] = ()  # legacy heuristic fallback
     tool_builder: Optional[Callable[[], List[ToolSpec]]] = None
     tool_executor_builder: Optional[Callable[[], Dict[str, Callable[[Dict[str, Any]], Any]]]] = None
+
+
+def runtime_config_from_yaml(filename: str = "runtime_inference") -> RuntimeConfig:
+    """Load RuntimeConfig defaults from configs/<filename>.yaml.
+
+    This is for the legacy Runtime_Inference_LlamaCPP path.
+    The preferred path is Engine.from_config_dir() (configs/inference.yaml).
+    """
+    cfg = load_config_yaml(filename)
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    model = cfg.get("model") or {}
+    state_defaults = cfg.get("state_defaults") or {}
+    runtime = cfg.get("runtime") or {}
+    tools = cfg.get("tools") or {}
+
+    promote_keywords = tools.get("promote_keywords") or []
+    if isinstance(promote_keywords, list):
+        promote_keywords = tuple(str(x) for x in promote_keywords if str(x).strip())
+    else:
+        promote_keywords = ()
+
+    return RuntimeConfig(
+        channel=str(cfg.get("channel", "cli")),
+        environment_id=str(cfg.get("environment_id", "local_cli")),
+        environment_name=str(cfg.get("environment_name", "local_cli")),
+
+        default_history_limit=int(cfg.get("default_history_limit", 20)),
+        compile_history_limit=int(cfg.get("compile_history_limit", 20)),
+
+        include_state_in_prompt=bool(cfg.get("include_state_in_prompt", True)),
+        include_tools_in_prompt=bool(cfg.get("include_tools_in_prompt", True)),
+
+        debug_print_messages=bool(cfg.get("debug_print_messages", True)),
+        debug_assert_messages_valid=bool(cfg.get("debug_assert_messages_valid", True)),
+
+        model_path=str(model.get("model_path", "")),
+        model_n_ctx=int(model.get("n_ctx", 8192)),
+        model_max_tokens=int(model.get("max_tokens", 256)),
+        model_temperature=float(model.get("temperature", 0.7)),
+        model_top_p=float(model.get("top_p", 0.9)),
+        model_n_gpu_layers=int(model.get("n_gpu_layers", 0)),
+
+        default_state_mode=str(state_defaults.get("mode", "idle")),
+        default_state_mood=str(state_defaults.get("mood", "neutral")),
+        default_state_energy=float(state_defaults.get("energy", 0.8)),
+
+        runtime_goal=str(runtime.get("goal", "help the user")),
+        runtime_mode=str(runtime.get("mode", "conversational")),
+        runtime_perception_facts=list(runtime.get("perception_facts", []) or []),
+        runtime_env_facts=list(runtime.get("env_facts", []) or []),
+        runtime_env_rules=list(runtime.get("env_rules", []) or []),
+        runtime_additional_policies=list(runtime.get("additional_policies", []) or []),
+        identity_role_append=str(runtime.get("identity_role_append", "")),
+
+        tool_promote_keywords=promote_keywords,
+    )
 
 
 # =============================================================================
@@ -226,6 +287,8 @@ def _resolve_path(p: str) -> str:
 
 def build_engine(cfg: RuntimeConfig) -> LlamaCppEngine:
     model_path = _resolve_path(cfg.model_path)
+    if not model_path:
+        raise ValueError("model_path is empty. Define it in your app config under /configs.")
     if not Path(model_path).exists():
         raise ValueError(f"Model path does not exist: {model_path}")
 
