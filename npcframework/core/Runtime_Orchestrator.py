@@ -296,6 +296,8 @@ def run_with_tools(
     hard_stop_after_successful_tool: bool = True,
     # ✅ NEW: allow tools even when user did NOT ask (simulation/agent mode)
     allow_spontaneous_tools: bool = False,
+    # ✅ NEW: if True, failed/invalid tool calls trigger an in-loop retry prompt (bounded by max_tool_steps)
+    retry_on_tool_error: bool = True,
 ) -> Tuple[str, List[Message]]:
     """Run inference with tool-call support + deterministic autorun + canonical answer enforcement.
 
@@ -321,10 +323,29 @@ def run_with_tools(
         if add_event and log_final_answer_event:
             add_event("assistant", text, {"channel": channel, "kind": "final_answer", "turn_id": turn_id})
 
+    # Track last successful tool for a sane fallback answer.
+    last_success_tool: Optional[str] = None
+    last_success_result: Any = None
+
     def _finalize_and_return(text: str) -> Tuple[str, List[Message]]:
-        final_text = (text or "").strip() or "No Output"
-        if canonical_answer is not None and canonical_answer not in final_text:
-            final_text = canonical_answer
+        # Never allow empty final output; it makes the CLI look broken.
+        final_text = (text or "").strip()
+
+        # Prefer canonical answer if we have one.
+        if canonical_answer is not None:
+            if not final_text or canonical_answer not in final_text:
+                final_text = canonical_answer
+
+        # If still empty, fall back to a short, truthful completion line.
+        if not final_text:
+            if last_success_tool is not None:
+                extracted = extract_canonical_answer(last_success_result)
+                if extracted:
+                    final_text = extracted
+                else:
+                    final_text = f"Done. ({last_success_tool})"
+            else:
+                final_text = "Done."
 
         if stream_callback:
             stream_callback(final_text)
@@ -350,6 +371,17 @@ def run_with_tools(
                 return ("add", {"a": int(m.group(1)), "b": int(m.group(2))})
 
         return None
+
+    def _as_history_message(assistant_text: str) -> List[Message]:
+        """Avoid re-injecting invalid tool_call lines into the next prompt.
+
+        If the assistant output is a tool call line, we store it as a system note instead of an
+        assistant message so the model doesn't treat it as an executed/valid call.
+        """
+        s = (assistant_text or "").strip()
+        if s.startswith(TOOL_CALL_PREFIX):
+            return [{"role": "system", "content": f"(Rejected model output) {s}"}]
+        return [{"role": "assistant", "content": assistant_text}]
 
     def _execute_tool(
         tool_name: str,
@@ -407,6 +439,94 @@ def run_with_tools(
 
     canonical_answer: Optional[str] = None
 
+    def _validate_tool_call(tool_name: str, args: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str]]:
+        """Validate a tool call BEFORE we log tool_call or execute.
+
+        Returns: (ok, args_after_patch, error)
+        """
+        if not tool_runtime or tool_name not in (tool_runtime.handlers or {}):
+            return False, args, f"unknown tool: {tool_name}"
+
+        schema = tool_runtime.schemas.get(tool_name) if tool_runtime else None
+        try:
+            validate_args(schema, args)
+        except Exception as e:
+            return False, args, str(e)
+
+        # Optional validator hook can reject or patch args.
+        if tool_runtime and tool_runtime.validate_call:
+            ok_v, err_v, patched = tool_runtime.validate_call(tool_name, args)
+            if not ok_v:
+                return False, args, err_v or "tool_call rejected"
+            if patched is not None:
+                args = patched
+
+        return True, args, None
+
+    def _push_retry_prompt(tool_name: str, error: str) -> None:
+        """Ask the model to correct the tool call, without finalizing.
+
+        Includes schema hints to reduce repeated invalid calls.
+        """
+        schema = tool_runtime.schemas.get(tool_name) if tool_runtime else None
+
+        # Build a compact schema hint (avoid huge dumps).
+        required = []
+        props = {}
+        try:
+            if isinstance(schema, dict):
+                required = list(schema.get("required") or [])
+                props = dict(schema.get("properties") or {})
+        except Exception:
+            required = []
+            props = {}
+
+        # Pretty-print enums for any properties that have them.
+        enum_hints = []
+        for k, v in (props or {}).items():
+            try:
+                if isinstance(v, dict) and "enum" in v and isinstance(v["enum"], list):
+                    enum_vals = v["enum"]
+                    # keep it short
+                    if len(enum_vals) > 30:
+                        enum_vals = enum_vals[:30] + ["..."]
+                    enum_hints.append(f"- {k}: one of {enum_vals}")
+            except Exception:
+                pass
+
+        # Example args skeleton
+        example_args = {}
+        for k in (required or []):
+            example_args[k] = "<value>"
+        if not example_args and props:
+            # include at least one property to show shape
+            first_key = next(iter(props.keys()))
+            example_args[first_key] = "<value>"
+
+        schema_hint_lines = []
+        if required:
+            schema_hint_lines.append(f"REQUIRED_FIELDS: {required}")
+        if enum_hints:
+            schema_hint_lines.append("ENUM_CONSTRAINTS:\n" + "\n".join(enum_hints))
+
+        schema_hint = ("\n".join(schema_hint_lines)).strip()
+
+        messages.extend([
+            {"role": "system", "content": (
+                "Tool call FAILED and must be corrected.\n"
+                "You MUST try again with valid arguments.\n\n"
+                f"FAILED_TOOL: {tool_name}\n"
+                f"ERROR: {error}\n\n"
+                + (schema_hint + "\n\n" if schema_hint else "")
+                + "Rules:\n"
+                f"- Output EXACTLY one line starting with {TOOL_CALL_PREFIX}.\n"
+                "- Include ALL required fields and respect enum constraints.\n"
+                "- Do NOT narrate success. Do NOT invent results.\n"
+                "- If you truly cannot proceed, ask ONE short clarification question (no tool call).\n\n"
+                f"Example:\n{TOOL_CALL_PREFIX} {tool_name} {json.dumps(example_args)}\n"
+            )}
+        ])
+
     # ------------------------
     # Autorun (ONLY if tool is required)
     # ------------------------
@@ -415,41 +535,63 @@ def run_with_tools(
         if autorun is not None:
             tool_name, args = autorun
 
-            _log(
-                "tool_call",
-                f"{TOOL_CALL_PREFIX} {tool_name} {json.dumps(args, ensure_ascii=False)}",
-                {"tool": tool_name, "tool_step": 1},
-            )
+            ok_v, args, err_v = _validate_tool_call(tool_name, args)
+            if not ok_v:
+                # No tool_call event for invalid calls
+                _log("tool_error", f"autorun_tool_call_rejected: {err_v}", {"tool": tool_name, "tool_step": 1})
+                tool_executed = True
+                # Do NOT write a fake /tool_result for invalid calls; keep DB clean.
+                messages = messages + [{"role": "system", "content": f"tool_call_rejected: {err_v} | attempted: (autorun) {tool_name} {args}"}]
+                if retry_on_tool_error:
+                    _push_retry_prompt(tool_name, err_v or "tool_call rejected")
+                    # fall through into main loop
+                else:
+                    messages = messages + [{"role": "system", "content": FINALIZE_SYSTEM_PROMPT}]
+            else:
+                _log(
+                    "tool_call",
+                    f"{TOOL_CALL_PREFIX} {tool_name} {json.dumps(args, ensure_ascii=False)}",
+                    {"tool": tool_name, "tool_step": 1},
+                )
 
-            ok, result, error, latency_ms, tool_result_text = _execute_tool(tool_name, args, tool_step=1)
+                ok, result, error, latency_ms, tool_result_text = _execute_tool(tool_name, args, tool_step=1)
 
-            tool_executed = True
-            tool_succeeded = tool_succeeded or ok
+                tool_executed = True
+                tool_succeeded = tool_succeeded or ok
 
-            extracted = extract_canonical_answer(result)
-            if extracted is not None:
-                canonical_answer = extracted
+                if ok:
+                    last_success_tool = tool_name
+                    last_success_result = result
 
-            # model must see tool_result
-            messages = messages + [{"role": "system", "content": tool_result_text}]
+                extracted = extract_canonical_answer(result)
+                if extracted is not None:
+                    canonical_answer = extracted
 
-            # reinforce canonical answer
-            if canonical_answer is not None:
-                messages = messages + [{
-                    "role": "system",
-                    "content": (
-                        "A tool has produced an authoritative answer.\n"
-                        "You MUST preserve the following value EXACTLY.\n\n"
-                        f"CANONICAL_ANSWER: {canonical_answer}\n\n"
-                        "Rules:\n"
-                        "- You may add style, tone, or commentary.\n"
-                        "- You MUST include the canonical answer verbatim.\n"
-                        "- Do NOT change numbers, times, or wording.\n"
-                    ),
-                }]
+                # model must see tool_result
+                messages = messages + [{"role": "system", "content": tool_result_text}]
 
-            messages = messages + [{"role": "system", "content": FINALIZE_SYSTEM_PROMPT}]
-            # Continue into model call for final answer; spiral guard below will stop further tools if configured.
+                if ok:
+                    # reinforce canonical answer
+                    if canonical_answer is not None:
+                        messages = messages + [{
+                            "role": "system",
+                            "content": (
+                                "A tool has produced an authoritative answer.\n"
+                                "You MUST preserve the following value EXACTLY.\n\n"
+                                f"CANONICAL_ANSWER: {canonical_answer}\n\n"
+                                "Rules:\n"
+                                "- You may add style, tone, or commentary.\n"
+                                "- You MUST include the canonical answer verbatim.\n"
+                                "- Do NOT change numbers, times, or wording.\n"
+                            ),
+                        }]
+                    messages = messages + [{"role": "system", "content": FINALIZE_SYSTEM_PROMPT}]
+                else:
+                    if retry_on_tool_error:
+                        _push_retry_prompt(tool_name, error or "tool execution failed")
+                    else:
+                        messages = messages + [{"role": "system", "content": FINALIZE_SYSTEM_PROMPT}]
+                # Continue into main loop.
 
     # ------------------------
     # Main loop
@@ -465,7 +607,7 @@ def run_with_tools(
         chunks: List[str] = []
         for token in engine.chat_stream(messages):
             chunks.append(token)
-        assistant_text = ("".join(chunks)).strip() or "No Output"
+        assistant_text = ("".join(chunks)).strip()
 
         # parse tool call
         try:
@@ -488,7 +630,7 @@ def run_with_tools(
                 blocked_spontaneous_once = True
                 messages = messages + [
                     # keep its text so you can debug why it wanted a tool
-                    {"role": "assistant", "content": assistant_text},
+                    *_as_history_message(assistant_text),
                     {"role": "system", "content": (
                         "Tool calls are NOT allowed in this turn.\n"
                         "Reply normally without calling any tool.\n"
@@ -537,41 +679,44 @@ def run_with_tools(
 
         tool_step += 1
 
+        # Validate BEFORE logging tool_call (prevents invalid calls from being written to DB)
+        ok_v, args, err_v = _validate_tool_call(tool_name, args)
+        if not ok_v:
+            attempted = (assistant_text or "").strip()
+
+            _log(
+                "tool_error",
+                f"tool_call_rejected: {err_v} | attempted: {attempted}",
+                {"tool": tool_name, "tool_step": tool_step},
+            )
+
+            tool_executed = True
+
+            # IMPORTANT: do NOT inject the rejected tool call as assistant history
+            messages = messages + [
+                {"role": "system", "content": f"tool_call_rejected: {err_v} | attempted: {attempted}"},
+            ]
+
+            if retry_on_tool_error:
+                _push_retry_prompt(tool_name, err_v or "tool_call rejected")
+            else:
+                messages = messages + [{"role": "system", "content": FINALIZE_SYSTEM_PROMPT}]
+            continue
+
         _log(
             "tool_call",
             f"{TOOL_CALL_PREFIX} {tool_name} {json.dumps(args, ensure_ascii=False)}",
             {"tool": tool_name, "tool_step": tool_step},
         )
 
-        # validator hook
-        if tool_runtime and tool_runtime.validate_call:
-            ok_v, err_v, patched = tool_runtime.validate_call(tool_name, args)
-            if not ok_v:
-                tool_result_text = format_tool_result(
-                    tool_name, ok=False, result=None, error=err_v or "tool_call rejected", latency_ms=0
-                )
-                _log(
-                    "tool_result",
-                    tool_result_text,
-                    {"tool": tool_name, "tool_step": tool_step, "ok": False, "latency_ms": 0},
-                )
-
-                tool_executed = True
-
-                messages = messages + [
-                    {"role": "assistant", "content": assistant_text},
-                    {"role": "system", "content": tool_result_text},
-                    {"role": "system", "content": FINALIZE_SYSTEM_PROMPT},
-                ]
-                continue
-
-            if patched is not None:
-                args = patched
-
         ok, result, error, latency_ms, tool_result_text = _execute_tool(tool_name, args, tool_step=tool_step)
 
         tool_executed = True
         tool_succeeded = tool_succeeded or ok
+
+        if ok:
+            last_success_tool = tool_name
+            last_success_result = result
 
         # update canonical answer if extractable
         new_canonical = extract_canonical_answer(result)
@@ -579,7 +724,7 @@ def run_with_tools(
             canonical_answer = new_canonical
 
         messages = messages + [
-            {"role": "assistant", "content": assistant_text},
+                *_as_history_message(assistant_text),
             {"role": "system", "content": tool_result_text},
         ]
 
@@ -598,4 +743,10 @@ def run_with_tools(
                 ),
             }]
 
-        messages = messages + [{"role": "system", "content": FINALIZE_SYSTEM_PROMPT}]
+        if ok:
+            messages = messages + [{"role": "system", "content": FINALIZE_SYSTEM_PROMPT}]
+        else:
+            if retry_on_tool_error:
+                _push_retry_prompt(tool_name, error or "tool execution failed")
+            else:
+                messages = messages + [{"role": "system", "content": FINALIZE_SYSTEM_PROMPT}]

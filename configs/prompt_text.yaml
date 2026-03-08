@@ -39,12 +39,15 @@ tool_use:
       - "Tools may be used ONLY if needed to answer the user accurately."
       - "If you do not need a tool, reply normally."
     call_format_intro: "To call a tool, output exactly ONE LINE in this format:"
-    call_format: '{tool_call_prefix} {"name":"<tool_name>","args":{}}'
+    # NOTE: Use a literal /tool_call so we do not rely on {tool_call_prefix} substitution.
+    # Double braces escape JSON braces if the runtime uses Python-style format().
+    call_format: '/tool_call {{"name":"<tool_name>","args":{{}}}}'
     rules_label: "Rules:"
     rules:
       - "No extra text before or after the tool call line."
       - "args MUST be a JSON object ({} if none)."
       - "Use only tool names listed below."
+      - "If using web_search, args MUST include \"query\" (string). Optional: \"max_results\" (int), \"recency_days\" (int)."
     tools_label: "Available Tools:"
     important_label: "Important:"
     important:
@@ -55,19 +58,22 @@ tool_use:
     intro:
       - "Tools are only available if listed below."
     call_format_intro: "When you need to use a tool, you MUST output exactly ONE LINE in this format:"
-    call_format: '{tool_call_prefix} {"name":"<tool_name>","args":{}}'
+    call_format: '/tool_call {{"name":"<tool_name>","args":{{}}}}'
     rules_label: "Rules:"
     rules:
       - "Do NOT add any other text before or after the tool call."
       - "args MUST be a JSON object. Use {} if there are no args."
       - "Use ONLY tool names from the list below."
       - "If you call a tool, your entire assistant output must be ONLY that one tool_call line."
+      - "For web_search, args MUST include \"query\" (string)."
     examples_label: "EXAMPLES:"
     examples:
       - user: "Use a tool to get the time"
-        assistant: '{tool_call_prefix} {"name":"time_now","args":{}}'
+        assistant: '/tool_call {{"name":"time_now","args":{{}}}}'
       - user: "Add 5 and 7"
-        assistant: '{tool_call_prefix} {"name":"add","args":{"a":5,"b":7}}'
+        assistant: '/tool_call {{"name":"add","args":{{"a":5,"b":7}}}}'
+      - user: "look up the news for current gold prices"
+        assistant: '/tool_call {{"name":"web_search","args":{{"query":"gold price today","max_results":5}}}}'
     tools_label: "Available Tools:"
 
 identity:

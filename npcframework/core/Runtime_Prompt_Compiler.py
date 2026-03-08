@@ -306,7 +306,8 @@ def build_tool_instructions(inj: RuntimeInjection) -> str:
         t_title = str(_txt_get(["tool_use", "compact", "title"], "TOOL USE"))
         intro = _txt_get(["tool_use", "compact", "intro"], [])
         call_format_intro = str(_txt_get(["tool_use", "compact", "call_format_intro"], "To call a tool, output exactly ONE LINE in this format:"))
-        call_format = str(_txt_get(["tool_use", "compact", "call_format"], '{tool_call_prefix} {"name":"<tool_name>","args":{}}'))
+        call_format = _txt_get(["tool_use", "compact", "call_format"],
+                               '/tool_call {{"name":"<tool_name>","args":{{}}}}')
         rules_label = str(_txt_get(["tool_use", "compact", "rules_label"], "Rules:"))
         rules = _txt_get(["tool_use", "compact", "rules"], [])
         tools_label = str(_txt_get(["tool_use", "compact", "tools_label"], "Available Tools:"))
@@ -352,7 +353,7 @@ def build_tool_instructions(inj: RuntimeInjection) -> str:
         t_title = str(_txt_get(["tool_use", "full", "title"], "TOOL USE INSTRUCTIONS"))
         intro = _txt_get(["tool_use", "full", "intro"], [])
         call_format_intro = str(_txt_get(["tool_use", "full", "call_format_intro"], "When you need to use a tool, you MUST output exactly ONE LINE in this format:"))
-        call_format = str(_txt_get(["tool_use", "full", "call_format"], '{tool_call_prefix} {"name":"<tool_name>","args":{}}'))
+        call_format = _txt_get(["tool_use", "full", "call_format"], '/tool_call {{"name":"<tool_name>","args":{{}}}}')
         rules_label = str(_txt_get(["tool_use", "full", "rules_label"], "Rules:"))
         rules = _txt_get(["tool_use", "full", "rules"], [])
         examples_label = str(_txt_get(["tool_use", "full", "examples_label"], "EXAMPLES:"))

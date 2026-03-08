@@ -14,6 +14,9 @@ tool_aliases:
   get_time: "time_now"
   time: "time_now"
   now: "time_now"
+  search: "web_search"
+  web: "web_search"
+  websearch: "web_search"
 
 # If user explicitly demands tool use, we can relax parsing and/or enforce a tool path.
 user_demands_tool_triggers:
@@ -23,6 +26,7 @@ user_demands_tool_triggers:
   - "tool call"
   - "use your tool"
   - "use the tool"
+  - "search the web"
 
 # Minimal deterministic autorun rules (optional; framework fallback only).
 # This is NOT meant to be smart. App-side routing should handle this.
@@ -31,3 +35,5 @@ autorun:
     keywords: ["time", "clock"]
   add:
     keywords: ["add", "+"]
+  web_search:
+    keywords: ["search", "look up", "google", "web"]
